@@ -16,7 +16,6 @@ function frame:SaveDialogOptions()
         { "Actions", "actions" },          -- Option for saving the player's action bar setup
         { "EmptySlots", "empty_slots" },   -- Option for saving empty action bar slots
         { "Talents", "talents" },          -- Option for saving the player's talents
-        { "PvPTalents", "pvp_talents" },   -- Option for saving the player's PvP talents
         { "Macros", "macros" },            -- Option for saving the player's macros
         { "PetActions", "pet_actions" },   -- Option for saving the player's pet action bar setup
         { "Bindings", "bindings" },        -- Option for saving the player's key bindings

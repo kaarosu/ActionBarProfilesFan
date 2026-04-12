@@ -1,11 +1,22 @@
 local addonName, addon = ...
 _G.ABP = ABP
-LibStub("AceAddon-3.0"):NewAddon(addon, addonName, "AceConsole-3.0", "AceTimer-3.0", "AceEvent-3.0", "AceSerializer-3.0")
+LibStub("AceAddon-3.0"):NewAddon(addon, addonName, "AceConsole-3.0", "AceTimer-3.0", "AceEvent-3.0")
 
 local L = LibStub("AceLocale-3.0"):GetLocale(addonName)
-local DEBUG = "|cffff0000Debug:|r "
+_G.ABP_DEBUG = false -- Global toggle for debug prints
+local DEBUG = ABP_DEBUG_PREFIX
 
 local qtip = LibStub("LibQTip-1.0")
+
+-- Localize globals for performance
+local _G = _G
+local pairs, select, unpack, type = pairs, select, unpack, type
+local strjoin, format = strjoin, format
+local UnitName, GetRealmName, UnitClass = UnitName, GetRealmName, UnitClass
+local GetSpecialization, GetSpecializationInfo = GetSpecialization, GetSpecializationInfo
+local InCombatLockdown, ToggleCharacter = InCombatLockdown, ToggleCharacter
+local C_Timer, C_UnitAuras = C_Timer, C_UnitAuras
+
 PaperDollActionBarProfilesPane = PaperDollActionBarProfilesPane or nil
 local origGetPaperDollSideBarFrame
 local ABP_tabNum
@@ -33,83 +44,6 @@ function ClearBarTwo()
 end
 
 
--- -- Copies the actions from bar 6 to bar 13.
--- -- This function is a wrapper that calls the addon-specific CopyBar6To13 method.
--- function CopyBar6To13()
-    -- return addon:CopyBar6To13()  -- Invoke the method to copy bar 6 actions to bar 13.
--- end
-
-
--- -- This function copies action bar slots 6 to 13, ensuring the actions in slots 6-12 are migrated to slots 145-156.
--- -- It is used to automatically migrate action bars during a profile update or UI overhaul.
--- function addon:CopyBar6To13()
-    -- -- Create a unique identifier for the player using their name, realm, and specialization.
-    -- local player = UnitName("player") .. "-" .. GetRealmName() .. "-" .. GetSpecializationInfo(GetSpecialization())
-
-    -- -- Variables to track the number of found actions in slots 13-24 and 145-156, and the number of failures during the copy process.
-    -- local found13 = 0
-    -- local found6 = 0
-    -- local fail = 0
-
-    -- -- Prevent infinite loops by limiting the number of copy attempts to 10.
-    -- if CopyAttempts > 10 then
-        -- return
-    -- end
-    -- CopyAttempts = CopyAttempts + 1
-
-    -- -- If the player has already been migrated, exit the function early.
-    -- if self.db.profile.migrated[player] then
-        -- return
-    -- end
-
-    -- -- Count the number of actions in slots 145-156 (bars 13-24).
-    -- for i = 145, 156 do
-        -- local type, id, sub = GetActionInfo(i)
-        -- if type ~= nil then
-            -- found13 = found13 + 1
-        -- end
-    -- end
-
-    -- -- Count the number of actions in slots 13-24 (bars 6-12).
-    -- for i = 13, 24 do
-        -- local type, id, sub = GetActionInfo(i)
-        -- if type ~= nil then
-            -- found6 = found6 + 1
-        -- end
-    -- end
-
-    -- -- Debugging output to show how many actions were found in each set of slots.
-    -- print("Found6: " .. found6)
-    -- print("Found13: " .. found13)
-
-    -- -- If there are more actions in slots 13-24, copy them to slots 145-156.
-    -- if found6 > found13 then
-        -- print("Copying Bars from 6 to 13")
-        -- -- Create a cache of the current state to avoid overwriting existing actions.
-        -- local cache = addon:MakeCache()
-        
-        -- -- Iterate over each slot from 13 to 24 and copy the action to the corresponding slot in bars 13-24.
-        -- for i = 13, 24 do
-            -- -- Save the action in the current slot.
-            -- local action = addon:SaveSingleAction(i)
-            -- -- Restore the saved action to the new slot, adjusting for the offset (132).
-            -- fail = fail + addon:RestoreSingleAction(action, i + 132, cache)
-        -- end
-        
-        -- -- If no failures occurred, schedule another attempt after 1 second to ensure all actions are copied.
-        -- if fail == 0 then
-            -- C_Timer.After(1, function() addon:CopyBar6To13(); end)
-        -- end
-    -- else
-        -- -- Mark the player as migrated if the action bars have been successfully copied.
-        -- if not self.db.profile.migrated then
-            -- self.db.profile.migrated = {}
-        -- end
-        -- self.db.profile.migrated[player] = true
-    -- end
-    -- return
--- end
-
 
 -- Conditional Print Function with Formatting
 -- This function prints a formatted string to the chat window if the condition is true.
@@ -121,13 +55,16 @@ function addon:cPrintf(cond, ...)
 end
 
 
--- Conditional Print Function
--- This function prints a message to the chat window if the condition is true.
--- It acts as a wrapper around the Print method, allowing conditional output.
 function addon:cPrint(cond, ...)
     if cond then 
         self:Print(...)  -- Call the Print method if the condition is met.
     end
+end
+
+
+-- Invalidates the current cache, forcing a rebuild on the next GUI update.
+function addon:InvalidateCache()
+    self.cacheDirty = true
 end
 
 
@@ -144,6 +81,9 @@ function addon:OnInitialize()
             replace_macros = false, -- Option to control macro replacement behavior.
         },
     }, ({ UnitClass("player") })[2]) -- Use the player's class for the default profile.
+    
+    self.isProcessing = false
+    self.cacheDirty = true
 
     -- Register callbacks to update the GUI when the profile is reset, changed, or copied.
     self.db.RegisterCallback(self, "OnProfileReset", "UpdateGUI")
@@ -254,6 +194,13 @@ function addon:OnInitialize()
         self:UpdateGUI() -- Update GUI after handling the spec change.
     end)
 
+    -- Register events to track when the player's spells, equipment, or talents change.
+    self:RegisterEvent("SPELLS_CHANGED", "InvalidateCache")
+    self:RegisterEvent("PLAYER_EQUIPMENT_CHANGED", "InvalidateCache")
+    self:RegisterEvent("TRAIT_CONFIG_UPDATED", "InvalidateCache")
+    self:RegisterEvent("BAG_UPDATE", "InvalidateCache")
+    self:RegisterEvent("PET_JOURNAL_LIST_UPDATE", "InvalidateCache")
+
     -- Register an event to handle aura changes on the player.
     self:RegisterEvent("UNIT_AURA", function(event, target)
         if target == "player" then
@@ -266,29 +213,31 @@ function addon:OnInitialize()
             self.auraTimer = self:ScheduleTimer(function()
                 self.auraTimer = nil
 
-                -- Replace GetSpellInfo with C_Spell.GetSpellInfo and retrieve the spell name for specific auras.
+                -- Check all auras on the player to see if any match the specified spell IDs.
                 local checkAura = {
-                    C_Spell.GetSpellInfo(ABP_TOME_OF_CLEAR_MIND_SPELL_ID).name,
-                    C_Spell.GetSpellInfo(ABP_TOME_OF_TRANQUIL_MIND_SPELL_ID).name,
-                    C_Spell.GetSpellInfo(ABP_DUNGEON_PREPARE_SPELL_ID).name,
+                    ABP_TOME_OF_CLEAR_MIND_SPELL_ID,
+                    ABP_TOME_OF_TRANQUIL_MIND_SPELL_ID,
+                    ABP_DUNGEON_PREPARE_SPELL_ID,
                 }
 
-                -- Commented out code for reference, in case older UnitAura API is needed.
-                -- local state, index
-                -- for index = 1, 40 do
-                --     local aura = UnitAura("player", index)
-                --     if aura and (aura == checkAura[1] or aura == checkAura[2] or aura == checkAura[3]) then
-                --         state = true
-                --     end
-                -- end
-
-                -- Check all auras on the player to see if any match the specified spell names.
-                local state, index
-                for index = 1, 40 do
-                    -- Replace UnitAura with C_UnitAuras.GetAuraDataByIndex to get the aura data.
-                    local aura = C_UnitAuras.GetAuraDataByIndex("player", index)
-                    if aura and (aura.name == checkAura[1] or aura.name == checkAura[2] or aura.name == checkAura[3]) then
+                local state = false
+                if C_UnitAuras and C_UnitAuras.GetPlayerAuraBySpellID then
+                    -- Modern Retail/Classic API
+                    if C_UnitAuras.GetPlayerAuraBySpellID(checkAura[1]) or 
+                       C_UnitAuras.GetPlayerAuraBySpellID(checkAura[2]) or 
+                       C_UnitAuras.GetPlayerAuraBySpellID(checkAura[3]) then
                         state = true
+                    end
+                else
+                    -- Fallback loop (Older clients)
+                    local auraName, auraIcon, auraCount, auraType, auraDuration, auraExpiration, auraSource, auraIsStealable, auraNameplateShowPersonal, auraSpellId
+                    for index = 1, 40 do
+                        auraName, auraIcon, auraCount, auraType, auraDuration, auraExpiration, auraSource, auraIsStealable, auraNameplateShowPersonal, auraSpellId = UnitAura("player", index)
+                        if auraSpellId and (auraSpellId == checkAura[1] or auraSpellId == checkAura[2] or auraSpellId == checkAura[3]) then
+                            state = true
+                            break
+                        end
+                        if not auraName then break end
                     end
                 end
 

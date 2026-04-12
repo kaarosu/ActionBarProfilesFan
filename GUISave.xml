@@ -48,7 +48,7 @@
             </Layer>
         </Layers>
         <Frames>
-            <EditBox name="$parentEditBox" letters="16" historyLines="0" autoFocus="true" parentKey="EditBox">
+            <EditBox name="$parentEditBox" letters="64" historyLines="0" autoFocus="true" parentKey="EditBox">
                 <Size x="182" y="20" />
                 <Anchors>
                     <Anchor point="TOPLEFT" x="29" y="-35" />
@@ -111,16 +111,10 @@
                     <Anchor point="TOPLEFT" relativeTo="$parentOptionEmptySlots" relativePoint="BOTTOMLEFT" x="-10" />
                 </Anchors>
             </CheckButton>
-            <CheckButton name="$parentOptionPvPTalents" parentKey="OptionPvPTalents" inherits="UICheckButtonTemplate">
-                <Size x="16" y="16" />
-                <Anchors>
-                    <Anchor point="TOPLEFT" relativeTo="$parentOptionTalents" relativePoint="BOTTOMLEFT" />
-                </Anchors>
-            </CheckButton>
             <CheckButton name="$parentOptionMacros" parentKey="OptionMacros" inherits="UICheckButtonTemplate">
                 <Size x="16" y="16" />
                 <Anchors>
-                    <Anchor point="TOPLEFT" relativeTo="$parentOptionPvPTalents" relativePoint="BOTTOMLEFT" />
+                    <Anchor point="TOPLEFT" relativeTo="$parentOptionTalents" relativePoint="BOTTOMLEFT" />
                 </Anchors>
             </CheckButton>
             <CheckButton name="$parentOptionPetActions" parentKey="OptionPetActions" inherits="UICheckButtonTemplate">

@@ -2,6 +2,18 @@ local addonName, addon = ...
 ABP = ABP or {}
 local L = LibStub("AceLocale-3.0"):GetLocale(addonName)
 
+-- Localize globals for performance
+local ipairs, select, unpack = ipairs, select, unpack
+local UnitClass, UnitName, GetRealmName, GetSpecialization, GetSpecializationInfo = UnitClass, UnitName, GetRealmName, GetSpecialization, GetSpecializationInfo
+local InCombatLockdown = InCombatLockdown
+local CreateFrame = CreateFrame
+local CharacterFrameInsetRight = CharacterFrameInsetRight
+local HybridScrollFrame_OnLoad, HybridScrollFrame_CreateButtons, HybridScrollFrame_Update, HybridScrollFrame_GetOffset = HybridScrollFrame_OnLoad, HybridScrollFrame_CreateButtons, HybridScrollFrame_Update, HybridScrollFrame_GetOffset
+local UIErrorsFrame = UIErrorsFrame
+local ERR_CLIENT_LOCKED_OUT = ERR_CLIENT_LOCKED_OUT
+local GREEN_FONT_COLOR, NORMAL_FONT_COLOR, GRAY_FONT_COLOR, RED_FONT_COLOR = GREEN_FONT_COLOR, NORMAL_FONT_COLOR, GRAY_FONT_COLOR, RED_FONT_COLOR
+local CLASS_ICON_TCOORDS = CLASS_ICON_TCOORDS
+
 ---@class frame
 local frame = PaperDollActionBarProfilesPane
 
@@ -27,8 +39,8 @@ function frame:OnInitialize()
     self.update = function() self:Update() end
 
     -- Create buttons for the scroll frame using the "ActionBarProfileButtonTemplate"
-    -- The buttons are offset by the height of the "Use Profile" button plus a small margin
-    HybridScrollFrame_CreateButtons(self, "ActionBarProfileButtonTemplate", 2, -(self.UseProfile:GetHeight() + 4))
+    -- The buttons are offset by the height of the Search Box and Action buttons plus margins
+    HybridScrollFrame_CreateButtons(self, "ActionBarProfileButtonTemplate", 2, -(self.SearchBox:GetHeight() + self.UseProfile:GetHeight() + 8))
 end
 
 
@@ -211,12 +223,22 @@ end
 
 function frame:Update()
     -- Retrieve the list of profiles from the add-on.
-	local profiles = { addon:GetProfiles() }
-    --local profiles = { ABP:GetProfiles() }  -- Use ABP here
+	local allProfiles = { addon:GetProfiles() }
+    local profiles = {}
+    local searchText = self.SearchBox:GetText():lower()
+
+    -- Filter profiles based on the search text
+    for _, profile in ipairs(allProfiles) do
+        if searchText == "" or profile.name:lower():find(searchText, 1, true) then
+            table.insert(profiles, profile)
+        end
+    end
+
     local rows = #profiles + 1  -- The total number of rows, including the "New Profile" button.
 
     -- Update the scroll frame to accommodate the number of rows.
-    HybridScrollFrame_Update(self, rows * ACTION_BAR_PROFILE_BUTTON_HEIGHT + self.UseProfile:GetHeight() + 20, self:GetHeight())
+    -- Adjusting total height for the SearchBox and Buttons at the top.
+    HybridScrollFrame_Update(self, rows * ACTION_BAR_PROFILE_BUTTON_HEIGHT + self.SearchBox:GetHeight() + self.UseProfile:GetHeight() + 20, self:GetHeight())
 
     -- Get the current scroll offset.
     local offset = HybridScrollFrame_GetOffset(self)
@@ -226,8 +248,12 @@ function frame:Update()
     local class = select(2, UnitClass("player"))
     local spec = GetSpecializationInfo(GetSpecialization())
 
-    -- Create a cache to store profile data temporarily.
-    local cache = addon:MakeCache()
+    -- Rebuild the cache only if it's marked as dirty (e.g., after an event update) or if it doesn't exist yet.
+    if addon.cacheDirty or not self.cachedData then
+        self.cachedData = addon:MakeCache()
+        addon.cacheDirty = false
+    end
+    local cache = self.cachedData
 
     -- Save the currently selected profile, then reset the selected profile.
     local selected = self.selected
@@ -328,8 +354,8 @@ function frame:Update()
 
             -- Apply a stripe texture to alternating rows for better visibility.
             if (i + offset) % 2 == 0 then
-                button.Stripe:SetColorTexture(0.9, 0.9, 1)
-                button.Stripe:SetAlpha(0.1)
+                button.Stripe:SetColorTexture(0.2, 0, 0.4)
+                button.Stripe:SetAlpha(0.2)
 
                 button.Stripe:Show()
             else

@@ -1,7 +1,13 @@
 local addonName, addon = ...
 
 local L = LibStub("AceLocale-3.0"):GetLocale(addonName)
-local DEBUG = "|cffff0000Debug:|r "
+local DEBUG = ABP_DEBUG_PREFIX
+
+-- Localize globals for performance
+local pairs = pairs
+local StaticPopup_Show = StaticPopup_Show
+local YES, NO = YES, NO
+local StaticPopupDialogs = StaticPopupDialogs
 
 -- Static Popup Dialog Definitions for Action Bar Profile Management
 -- These dialogs handle user confirmation for various actions related to action bar profiles.

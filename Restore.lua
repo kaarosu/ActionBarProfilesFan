@@ -1,12 +1,42 @@
 local addonName, addon = ...
 
 local L = LibStub("AceLocale-3.0"):GetLocale(addonName)
-local DEBUG = "|cffff0000Debug:|r "
+local DEBUG = ABP_DEBUG_PREFIX
 
----@type table
+-- Localize globals for performance
+local _G = _G
+local pairs, ipairs, select, unpack = pairs, ipairs, select, unpack
+local tonumber, tostring, type, pcall = tonumber, tostring, type, pcall
+local strsplit, format = strsplit, format
+local bit = bit
+local UnitClass, UnitLevel, UnitFactionGroup = UnitClass, UnitLevel, UnitFactionGroup
+local GetSpecialization, GetSpecializationInfo = GetSpecialization, GetSpecializationInfo
+local IsResting, IsSpellKnown, PlayerHasToy = IsResting, IsSpellKnown, PlayerHasToy
+local GetNumMacros, GetMacroInfo, CreateMacro, DeleteMacro = GetNumMacros, GetMacroInfo, CreateMacro, DeleteMacro
+local GetBinding, SetBinding, GetNumBindings, SetBindingClick = GetBinding, SetBinding, GetNumBindings, SetBindingClick
+local GetCurrentBindingSet, SaveBindings = GetCurrentBindingSet, SaveBindings
+local GetProfessions, GetProfessionInfo = GetProfessions, GetProfessionInfo
+local GetFlyoutInfo, GetFlyoutSlotInfo = GetFlyoutInfo, GetFlyoutSlotInfo
+local GetTalentTierInfo, GetTalentInfo = GetTalentTierInfo, GetTalentInfo
+local GetPvpTalentInfoByID = GetPvpTalentInfoByID
+
+local C_Timer = C_Timer
+local C_Spell = C_Spell
+local C_SpellBook = C_SpellBook
+local C_Item = C_Item
+local C_Container = C_Container
+local C_ClassTalents = C_ClassTalents
+local C_Traits = C_Traits
+local C_MountJournal = C_MountJournal
+local C_ToyBox = C_ToyBox
+local C_EquipmentSet = C_EquipmentSet
+local C_PetJournal = C_PetJournal
+local C_Garrison = C_Garrison
+local C_SpecializationInfo = C_SpecializationInfo
+local Enum = Enum
+
 _G.ActionBarProfilesDBv3 = _G.ActionBarProfilesDBv3 or {}
 
-local S2KFI = LibStub("LibS2kFactionalItems-1.0")
 ABP = ABP or {}
 
 -- Function to retrieve and optionally filter a list of profiles
@@ -50,57 +80,99 @@ function addon:GetProfiles(filter, case)
 end
 
 
--- Function to use a given profile, restoring various game elements based on the profile's settings
+local ABP_TempTalentString = ""
+
+StaticPopupDialogs["ABP_TALENT_IMPORT"] = {
+    text = "Talent string mismatch detected!\nPlease copy the string below (Ctrl+C), import it in WoW, apply it, and restore again.\n\nAlternatively, if you are leveling and cannot distribute all points yet, click 'Skip Talents' to force Action Bars to restore anyway.",
+    button1 = "Skip Talents (Force Restore)",
+    button2 = "Close",
+    hasEditBox = 1,
+    editBoxWidth = 260,
+    OnShow = function(self)
+        local editBox = _G[self:GetName().."EditBox"]
+        if editBox then
+            editBox:SetText(ABP_TempTalentString or "")
+            editBox:HighlightText()
+            editBox:SetFocus()
+        end
+    end,
+    OnAccept = function(self, data)
+        if data and type(data.continueRestore) == "function" then
+            data.continueRestore()
+        end
+    end,
+    EditBoxOnEscapePressed = function(self)
+        self:GetParent():Hide()
+    end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+}
+
+-- Function to use a given profile, restoring various game elements based on the profile's settings.
+-- This is now sequential: Talents (via Import String) -> Macros -> Actions -> Pet Actions.
 function addon:UseProfile(profile, check, cache)
     -- If the profile parameter is not a table, assume it's a profile name and retrieve the corresponding profile from the database
     if type(profile) ~= "table" then
         local list = self.db.profile.list
         profile = list[profile]
+        if not profile then return 0, 0 end
+    end
 
-        -- Early return if the profile is not found
-        if not profile then
-            return 0, 0
+    cache = cache or self:MakeCache()
+    local res = { fail = 0, total = 0 }
+
+    -- Define the final steps of restoration
+    local function FinishRestoration()
+        if not profile.skipActions then
+            self:RestoreActions(profile, check, cache, res)
+        end
+        if not profile.skipPetActions then
+            self:RestorePetActions(profile, check, cache, res)
+        end
+        if not check then
+            self:UpdateGUI()
         end
     end
 
-    -- Create a cache if none was provided
-    cache = cache or self:MakeCache()
+    -- Check Talents via Import String first
+    if not profile.skipTalents and profile.talentString then
+        local currentConfigID = C_ClassTalents.GetActiveConfigID()
+        local currentString = currentConfigID and C_Traits.GenerateImportString(currentConfigID) or ""
+        
+        -- If the import strings do not match, we prompt the user to manually import it and abort the action bar restore.
+        if currentString ~= profile.talentString then
+            if check then
+                return 0, 0  -- Bypass the missing spells verification dialog since we need to swap talents first anyway!
+            end
 
-    -- Initialize a result table to track failures and total restoration attempts
-    local res = { fail = 0, total = 0 }
-
-    -- If this is not a check, proceed to restore the talents
-    if not check and not profile.skipTalents then
-        self:RestoreTalents(profile, check, cache, res)
+            ABP_TempTalentString = profile.talentString
+            local popupData = {
+                continueRestore = function()
+                    if not profile.skipMacros then self:RestoreMacros(profile, check, cache, res) end
+                    C_Timer.After(0.2, function()
+                        if not profile.skipActions then self:RestoreActions(profile, check, cache, res) end
+                        if not profile.skipPetActions then self:RestorePetActions(profile, check, cache, res) end
+                        self:UpdateGUI()
+                    end)
+                end
+            }
+            StaticPopup_Show("ABP_TALENT_IMPORT", nil, nil, popupData)
+            return res.fail, res.total
+        end
     end
 
-    -- Continue with the restoration of other elements
     if not profile.skipMacros then
         self:RestoreMacros(profile, check, cache, res)
     end
-
-    if not profile.skipPvpTalents then
-        self:RestorePvpTalents(profile, check, cache, res)
-    end
-
-    if not profile.skipActions then
-        self:RestoreActions(profile, check, cache, res)
-    end
-
-    if not profile.skipPetActions then
-        self:RestorePetActions(profile, check, cache, res)
-    end
-
-    if not profile.skipBindings then
-        --self:RestoreBindings(profile, check, cache, res)
-    end
-
-    -- Update the GUI if not in check mode
+    
+    -- Give the game a moment to register new spells in the spellbook
     if not check then
-        self:UpdateGUI()
+        C_Timer.After(0.2, FinishRestoration)
+    else
+        FinishRestoration()
     end
 
-    -- Return the number of failed and total restoration attempts
     return res.fail, res.total
 end
 
@@ -255,7 +327,7 @@ function ABP:DebugPrintTalents(classProfile, listProfile)
     local classProfiles = self.db and self.db.profiles[classProfile]
     if not classProfiles then
         -- If the class profile is not found, print an error message and exit
-        print("Class profile not found: " .. tostring(classProfile))
+        if ABP_DEBUG then print("Class profile not found: " .. tostring(classProfile)) end
         return
     end
 
@@ -263,16 +335,16 @@ function ABP:DebugPrintTalents(classProfile, listProfile)
     local profile = classProfiles.list and classProfiles.list[listProfile]
     if not profile or not profile.talents then
         -- If the list profile or its talents are not found, print an error message and exit
-        print("List profile not found in class profile: " .. tostring(listProfile))
+        if ABP_DEBUG then print("List profile not found in class profile: " .. tostring(listProfile)) end
         return
     end
 
     -- Print the header message indicating the start of talent listing
-    print("Talents in profile: " .. listProfile)
+    if ABP_DEBUG then print("Talents in profile: " .. listProfile) end
 
     -- Iterate through each talent in the profile's talents list and print its details
     for i, talentInfo in ipairs(profile.talents) do
-        print("Talent " .. i .. ": " .. talentInfo.spellName .. " (ID: " .. talentInfo.spellID .. ")")
+        if ABP_DEBUG then print("Talent " .. i .. ": " .. talentInfo.spellName .. " (ID: " .. talentInfo.spellID .. ")") end
     end
 end
 
@@ -348,11 +420,13 @@ function GetMySpecAndConfig()
         ABP.currentClassProfile = currentClassProfile
 
         -- Uncomment the following lines for debugging purposes:
-        print("Your current specialization index is: " .. ABP.specIndex)
-        print("Your current specialization ID is: " .. ABP.specID)
-        print("Your current trait tree ID is: " .. (ABP.treeID or "nil"))
-        print("Your active configuration ID is: " .. (ABP.configID or "nil"))
-        print("Current class profile in use: " .. ABP.currentClassProfile)
+        if ABP_DEBUG then
+            print("Your current specialization index is: " .. ABP.specIndex)
+            print("Your current specialization ID is: " .. ABP.specID)
+            print("Your current trait tree ID is: " .. (ABP.treeID or "nil"))
+            print("Your active configuration ID is: " .. (ABP.configID or "nil"))
+            print("Current class profile in use: " .. ABP.currentClassProfile)
+        end
     else
         --Uncomment the following line to notify when no specialization is selected
         print("You have no specialization selected.")
@@ -375,7 +449,7 @@ function addon:AreTalentsMatching(profile)
 
     local configInfo = C_Traits.GetConfigInfo(configID)
     if not configInfo then
-        print("No config info found for ID: " .. configID)
+        if ABP_DEBUG then print("No config info found for ID: " .. configID) end
         return false, {}, {}
     end
 
@@ -385,8 +459,10 @@ function addon:AreTalentsMatching(profile)
 
     -- Create a lookup table for quick comparison
     local profileTalentLookup = {}
-    for _, talent in ipairs(profile.talents) do
-        profileTalentLookup[talent.nodeID] = talent
+    if profile.talents and type(profile.talents) == "table" then
+        for _, talent in ipairs(profile.talents) do
+            profileTalentLookup[talent.nodeID] = talent
+        end
     end
 
     -- Iterate over each node in the active talent tree
@@ -420,7 +496,7 @@ function addon:AreTalentsMatching(profile)
                         })
 
                         -- Log mismatch for debugging
-                        print(string.format("Mismatch detected: NodeID %d - Active EntryID %d, Expected EntryID %d", nodeID, nodeInfo.activeEntry.entryID, profileTalent.entryID))
+                        if ABP_DEBUG then print(string.format("Mismatch detected: NodeID %d - Active EntryID %d, Expected EntryID %d", nodeID, nodeInfo.activeEntry.entryID, profileTalent.entryID)) end
                     elseif nodeInfo.currentRank < profileTalent.ranksPurchased then
                         -- Handle normal nodes where ranks don't match
                         table.insert(talentsToLearn, {
@@ -453,7 +529,7 @@ end
 
 
 -- Function to restore talents based on a saved profile
-function addon:RestoreTalents(profile, check, cache, res)
+function addon:RestoreTalents(profile, check, cache, res, onComplete)
     --print("RestoreTalents called for profile: " .. (profile.name or "Unknown"))
 
     if not profile.specID then
@@ -477,13 +553,13 @@ function addon:RestoreTalents(profile, check, cache, res)
     local talentsMatch, talentsToLearn, talentsToUnlearn = self:AreTalentsMatching(profile)
 
     if talentsMatch then
-        print("Talents already match the saved profile. Skipping restore.")
+        if ABP_DEBUG then print("Talents already match the saved profile. Skipping restore.") end
         return
     end
 
     -- Check if the number of talents to unlearn is 5 or greater
     if #talentsToUnlearn >= 5 then
-        self:FixRestoreTalents(profile)
+        self:FixRestoreTalents(profile, onComplete)
         return
     end
 
@@ -498,15 +574,6 @@ function addon:RestoreTalents(profile, check, cache, res)
         if index > #talentsToLearn then
             local commitSuccess = C_ClassTalents.CommitConfig(configID)
             if not commitSuccess then
-                --print("There was an error committing the talent configuration.")
-            else
-                --print("Talent configuration committed successfully.")
-            end
-
-            -- Recheck talents after learning to ensure they match the profile
-            local talentsMatchAfterLearn, _, _ = self:AreTalentsMatching(profile)
-            if not talentsMatchAfterLearn then
-                self:FixRestoreTalents(profile)
             end
 
             if PlayerSpellsFrame then
@@ -555,7 +622,7 @@ function addon:RestoreTalents(profile, check, cache, res)
             return
         end
 
-        print("Unlearning talent node: " .. nodeData.nodeInfo.ID)
+        if ABP_DEBUG then print("Unlearning talent node: " .. nodeData.nodeInfo.ID) end
         local success = C_Traits.RefundRank(configID, nodeData.nodeInfo.ID, true)
 
         -- Verify the unlearn operation
@@ -574,7 +641,7 @@ function addon:RestoreTalents(profile, check, cache, res)
                     end
                 end)
             else
-                print("Successfully unlearned talent for node: " .. nodeData.nodeInfo.ID)
+                if ABP_DEBUG then print("Successfully unlearned talent for node: " .. nodeData.nodeInfo.ID) end
                 UnlearnTalentsWithDelay(index + 1)
             end
         end)
@@ -586,7 +653,7 @@ end
 
 
 -- Function to restore talents based on a saved profile with a complete reset
-function addon:FixRestoreTalents(profile)
+function addon:FixRestoreTalents(profile, onComplete)
     --print("FixRestoreTalents called for profile: " .. (profile.name or "Unknown"))
 
     if not profile.specID then
@@ -601,15 +668,26 @@ function addon:FixRestoreTalents(profile)
         return
     end
 
+    -- Flag the addon as processing to prevent overlapping or invalid operations
+    if self.isProcessing then
+        self:Printf("Error: Addon is already processing another request.")
+        return
+    end
+    self.isProcessing = true
+
     local configID = C_ClassTalents.GetActiveConfigID()
     if not configID then
+        self.isProcessing = false
         --print("No active config ID found.")
+        if onComplete then onComplete() end
         return
     end
 
     local configInfo = C_Traits.GetConfigInfo(configID)
     if not configInfo then
+        self.isProcessing = false
         --print("No config info found for ID: " .. configID)
+        if onComplete then onComplete() end
         return
     end
 
@@ -630,27 +708,26 @@ function addon:FixRestoreTalents(profile)
     local function LearnTalentWithDelay(index)
         if index > #profile.talents then
             local commitSuccess = C_ClassTalents.CommitConfig(configID)
+            self.isProcessing = false
             if not commitSuccess then
-                --print("There was an error committing the talent configuration.")
+                self:Printf("There was an error committing the talent configuration.")
             else
-                --print("Talent configuration committed successfully.")
+                self:Printf("Talent configuration committed successfully.")
             end
 
             if PlayerSpellsFrame then
                 HideUIPanel(PlayerSpellsFrame)
                 ShowUIPanel(PlayerSpellsFrame)
-                --print("Talent frame refreshed.")
             end
+            if onComplete then onComplete() end
             return
         end
 
         local talent = profile.talents[index]
         local nodeInfo = C_Traits.GetNodeInfo(configID, talent.nodeID)
 
-        -- Check if it's a free talent; if so, skip it
-        --if nodeInfo and nodeInfo.(isFree) then
-        --if nodeInfo and nodeInfo.currentRank > 0 and nodeInfo.ranksPurchased == 0 and not nodeInfo.canPurchaseRank then
-        if nodeInfo and nodeInfo.isFree then
+        -- Check if it's a free talent in the profile; if so, skip it as it's auto-learned
+        if talent.isFreeTalent then
             --print("Skipping free talent node: " .. talent.nodeID)
             C_Timer.After(0.1, function()
                 LearnTalentWithDelay(index + 1)
@@ -672,7 +749,7 @@ function addon:FixRestoreTalents(profile)
                             -- Change to the desired selection in the profile
                             success = C_Traits.SetSelection(configID, talent.nodeID, talent.entryID)
                             -- Debug output
-                            print(string.format("Switching choice node to entryID %d for nodeID %d", talent.entryID, talent.nodeID))
+                            if ABP_DEBUG then print(string.format("Switching choice node to entryID %d for nodeID %d", talent.entryID, talent.nodeID)) end
                         else
                             -- If already selected, consider it successful
                             success = true
@@ -682,14 +759,14 @@ function addon:FixRestoreTalents(profile)
                     end
 
                     if not success then
-                        print("Unable to learn talent for node: " .. talent.nodeID)
+                        if ABP_DEBUG then print("Unable to learn talent for node: " .. talent.nodeID) end
                         break
                     else
                         ranksPurchased = ranksPurchased + 1
                     end
                 end
             else
-                print("Prerequisites not met for talent or node not available: " .. talent.nodeID)
+                if ABP_DEBUG then print("Prerequisites not met for talent or node not available: " .. talent.nodeID) end
             end
         else
             --print("No node information found for node: " .. talent.nodeID)
@@ -704,27 +781,6 @@ function addon:FixRestoreTalents(profile)
     -- Start learning talents with a delay
     LearnTalentWithDelay(1)
 end
-
-
--- -- Function that handles the player's click on a talent in the PlayerTalentFrame - FUNCTION NO LONGER USED
--- function PlayerTalentFrameTalent_OnClick(self, button)
-    -- -- Check if a specialization is selected and it is the active one
-    -- if (selectedSpec and (activeSpec == selectedSpec)) then
-        -- -- Get the talent ID from the clicked talent frame
-        -- local talentID = self:GetID()
-
-        -- -- Retrieve information about the talent, including whether it is available and if it is already known
-        -- local _, _, _, _, available, _, _, _, _, known = GetTalentInfoByID(talentID, specs[selectedSpec].talentGroup, true);
-
-        -- -- If the talent is available, not already known, and the left mouse button was clicked, learn the talent
-        -- if (available and not known and button == "LeftButton") then
-            -- return LearnTalent(talentID)
-        -- end
-    -- end
-
-    -- -- Return false if the conditions for learning the talent were not met
-    -- return false
--- end
 
 
 -- Function to learn talents from a stored profile in the database
@@ -747,7 +803,7 @@ function addon:LearnTalentsFromDB(profileName)
                 LearnTalent(talentID)
             else
                 -- If the talent is already learned, print a message indicating this
-                print("Talent already learned:", talentData.spellName, "ID:", talentID)
+                if ABP_DEBUG then print("Talent already learned:", talentData.spellName, "ID:", talentID) end
             end
         end
     end
@@ -871,7 +927,7 @@ function addon:RestoreActions(profile, check, cache, res)
 
                 if type == "spell" or type == "talent" then
                     --if not IsSpellKnown(id) then
-                    if id and not IsSpellKnown(id) then
+                    if id and not (IsPlayerSpell(id) or IsSpellKnown(id) or ABP_SPECIAL_SPELLS[id]) then
                         --self:Printf("Spell not found: [%s]", name)
                         fail = fail + 1
                         ok = false
@@ -936,7 +992,7 @@ function addon:RestoreActions(profile, check, cache, res)
                         end
                     end
                     if not ok and not check then
-                        self:PlaceItem(slot, S2KFI:GetConvertedItemId(id) or id, link)
+                        self:PlaceItem(slot, id, link)
                     end
                     ok = true
 
@@ -1001,6 +1057,48 @@ function addon:RestoreActions(profile, check, cache, res)
                         end
 
                         self:cPrintf(not ok and not check, L.msg_equip_not_exists, link)
+                    elseif sub == "summonmount" then
+                        -- For the abp:summonmount type, id is the mountID or random mount spellID
+                        if id == ABP_RANDOM_MOUNT_SPELL_ID then
+                            ok = true
+                            if not check then
+                                self:PlaceMount(slot, 0, link)
+                            end
+                        else
+                            -- Find the mount in the journal by mountID (which was saved as id)
+                            -- Actually, the abp:summonmount link was being saved with mountID in p1
+                            local name, spellID = C_MountJournal.GetMountInfoByID(id)
+                            if spellID then
+                                local found = self:FindSpellInCache(cache.spells, spellID, name, not check and link)
+                                if found then
+                                    ok = true
+                                    if not check then
+                                        self:PlaceSpell(slot, found, link)
+                                    end
+                                end
+                            end
+                        end
+                        self:cPrintf(not ok and not check, L.msg_spell_not_exists, link)
+                    elseif sub == "companion" then
+                        -- Handle generic companion types
+                        if id and id > 0 then
+                            local found = self:FindSpellInCache(cache.spells, id, name, not check and link)
+                            if found then
+                                ok = true
+                                if not check then
+                                    self:PlaceSpell(slot, found, link)
+                                end
+                            end
+                        end
+                        self:cPrintf(not ok and not check, L.msg_spell_not_exists, link)
+                    elseif sub == "action" then
+                        -- Handle generic Blizzard action types (Special UI buttons)
+                        ok = true
+                        if not check then
+                            ClearCursor()
+                            PickupAction(id)
+                            self:PlaceToSlot(slot)
+                        end
                     else
                         self:cPrintf(not check, L.msg_bad_link, link)
                     end
@@ -1038,190 +1136,6 @@ function addon:RestoreActions(profile, check, cache, res)
     return fail, total  -- Return the number of failures and total actions.
 end
 
-
--- -- Restores a single action in the specified action bar slot using the provided action data and cache.
--- function addon:RestoreSingleAction(action, slot, cache, check)
-    -- -- Retrieve the list of profiles associated with the addon.
-    -- local profiles = { addon:GetProfiles() }
-    -- local profile
-
-    -- local fail = 0  -- Initialize a failure counter.
-
-    -- if action then  -- Check if the action is valid.
-        -- local link = action  -- Assign the action to a local variable.
-        -- local ok  -- Flag to indicate if the action was successfully restored.
-
-        -- -- Extract data and name from the action link.
-        -- local data, name = link:match("^|c.-|H(.-)|h%[(.-)%]|h|r$")
-        -- link = link:gsub("|Habp:.+|h(%[.+%])|h", "%1")
-
-        -- if data then  -- Ensure the data is valid.
-            -- -- Extract individual parts from the action data string.
-            -- local type, sub, p1, p2, _, _, _, p6 = strsplit(":", data)
-            -- local id = tonumber(sub)
-
-            -- -- Handle spell and talent actions.
-            -- if type == "spell" or type == "talent" then
-                -- if id == ABP_RANDOM_MOUNT_SPELL_ID then  -- Special handling for random mount.
-                    -- ok = true
-                    -- if not check then
-                        -- self:PlaceMount(slot, 0, link)  -- Place a random mount in the slot.
-                    -- end
-                -- else
-                    -- -- Try to find the spell in the cache.
-                    -- local found = self:FindSpellInCache(cache.spells, id, name, not check and link)
-                    -- if found then
-                        -- ok = true
-                        -- if not check then
-                            -- self:PlaceSpell(slot, found, link)  -- Place the spell in the slot.
-                        -- end
-                    -- else
-                        -- -- If not found, try to find the talent in the cache.
-                        -- found = self:GetFromCache(cache.talents, id, name, not check and link)
-                        -- if found then
-                            -- ok = true
-                            -- if not check then
-                                -- self:PlaceTalent(slot, found, link)  -- Place the talent in the slot.
-                            -- end
-                        -- end
-                    -- end
-                -- end
-                -- self:cPrintf(not ok and not check, L.msg_spell_not_exists, link)
-
-            -- -- Handle PvP talent actions (although likely unnecessary due to spell ID usage).
-            -- elseif type == "pvptal" then
-                -- local found = self:GetFromCache(cache.pvpTalents, id, name, not check and link)
-                -- if found then
-                    -- ok = true
-                    -- if not check then
-                        -- self:PlacePvpTalent(slot, found, link)  -- Place the PvP talent in the slot.
-                    -- end
-                -- end
-                -- self:cPrintf(not ok and not check, L.msg_spell_not_exists, link)
-
-            -- -- Handle item actions, including toys and equipment.
-            -- elseif type == "item" then
-                -- if id and PlayerHasToy(id) then
-                    -- ok = true
-                    -- if not check then
-                        -- self:PlaceItem(slot, id, link)  -- Place the toy in the slot.
-                    -- end
-                -- else
-                    -- -- Try to find the item in the equipment cache.
-                    -- local found = self:FindItemInCache(cache.equip, id, name, not check and link)
-                    -- if found then
-                        -- ok = true
-                        -- if not check then
-                            -- self:PlaceInventoryItem(slot, found, link)  -- Place the inventory item in the slot.
-                        -- end
-                    -- else
-                        -- -- If not found, try to find the item in the bags cache.
-                        -- found = self:FindItemInCache(cache.bags, id, name, not check and link)
-                        -- if found then
-                            -- ok = true
-                            -- if not check then
-                                -- self:PlaceContainerItem(slot, found[1], found[2], link)  -- Place the container item in the slot.
-                            -- end
-                        -- end
-                    -- end
-                -- end
-
-                -- -- Attempt to place the item even if not found, possibly using a fallback ID conversion.
-                -- if not ok and not check then
-                    -- self:PlaceItem(slot, S2KFI:GetConvertedItemId(id) or id, link)
-                -- end
-                -- ok = true  -- Mark as successful to avoid clearing the slot.
-
-            -- -- Handle battle pet actions.
-            -- elseif type == "battlepet" then
-                -- local found = self:GetFromCache(cache.pets, p6, id, not check and link)
-                -- if found then
-                    -- ok = true
-                    -- if not check then
-                        -- self:PlacePet(slot, found, link)  -- Place the pet in the slot.
-                    -- end
-                -- end
-                -- self:cPrintf(not ok and not check, L.msg_pet_not_exists, link)
-
-            -- -- Handle ABP custom types like flyouts and macros.
-            -- elseif type == "abp" then
-                -- id = tonumber(p1)
-
-                -- -- Handle flyout actions.
-                -- if sub == "flyout" then
-                    -- local found = self:FindFlyoutInCache(cache.flyouts, id, name, not check and link)
-                    -- if found then
-                        -- ok = true
-                        -- if not check then
-                            -- self:PlaceFlyout(slot, found, Enum.SpellBookSpellBank.Player, link)  -- Place the flyout in the slot.
-                        -- end
-                    -- end
-                    -- self:cPrintf(not ok and not check, L.msg_spell_not_exists, link)
-
-                -- -- Handle macro actions.
-                -- elseif sub == "macro" then
-                    -- local found = self:GetFromCache(cache.macros, self:PackMacro(self:DecodeLink(p2)), name, not check and link)
-                    -- if found then
-                        -- ok = true
-                        -- if not check then
-                            -- self:PlaceMacro(slot, found, link)  -- Place the macro in the slot.
-                        -- end
-                    -- end
-
-                    -- -- Skip handling if macros are disabled in the profile.
-                    -- if profile.skipMacros then
-                        -- self:cPrintf(not ok and not check, L.msg_macro_not_exists, link)
-                    -- end
-
-				-- -- Handle equipment set actions.
-				-- elseif sub == "equip" then
-					-- local equipmentSetID
-					-- -- Retrieve all equipment set IDs
-					-- local equipmentSetIDs = C_EquipmentSet.GetEquipmentSetIDs()
-
-					-- -- Find the correct equipment set ID by matching the name
-					-- for _, setID in ipairs(equipmentSetIDs) do
-						-- local setName = C_EquipmentSet.GetEquipmentSetInfo(setID)
-						-- if setName == name then
-							-- equipmentSetID = setID
-							-- break
-						-- end
-					-- end
-
-					-- if equipmentSetID then
-						-- ok = true
-						-- if not check then
-							-- self:PlaceEquipment(slot, name, link)  -- Place the equipment set in the slot.
-						-- end
-					-- end
-
-					-- self:cPrintf(not ok and not check, L.msg_equip_not_exists, link)
-				-- else
-					-- self:cPrintf(not check, L.msg_bad_link, link)
-				-- end
-            -- else
-                -- self:cPrintf(not check, L.msg_bad_link, link)
-            -- end
-        -- else
-            -- self:cPrintf(not check, L.msg_bad_link, link)
-        -- end
-
-        -- -- If the action was not successfully placed, increment the failure counter.
-        -- if not ok then
-            -- fail = fail + 1
-            -- if not profile.skipEmptySlots and not check then
-                -- self:ClearSlot(slot)  -- Clear the slot if it should not be left empty.
-            -- end
-        -- end
-    -- else
-        -- -- If no action is found and empty slots should not be skipped, clear the slot.
-        -- if not profile.skipEmptySlots and not check then
-            -- self:ClearSlot(slot)
-        -- end
-    -- end
-
-    -- return fail  -- Return the number of failures.
--- end
 
 
 -- This function iterates through each action bar slot, checks if the slot is empty, and places the correct macro or spell based on the profile's actions.
@@ -1280,8 +1194,6 @@ function ABP:ActionButtonOverride(profileKey, profileName)
             end
         end
     end
-	
-	addon:AreTalentsMatching(profile)
 end
 
 
@@ -1464,7 +1376,7 @@ function addon:FindSpellInCache(cache, id, name, link)
     -- First, try to get the spell from the cache.
     local found = self:GetFromCache(cache, id, name, link)
     if found then
-        print("Spell found in cache:", id)
+        if ABP_DEBUG then print("Spell found in cache:", id) end
         return found
     end
 
@@ -1474,7 +1386,7 @@ function addon:FindSpellInCache(cache, id, name, link)
         for _, alt in ipairs(similar) do
             found = self:GetFromCache(cache, alt)
             if found then
-                print("Similar spell found in cache:", alt)
+                if ABP_DEBUG then print("Similar spell found in cache:", alt) end
                 return found
             end
         end
@@ -1510,7 +1422,7 @@ function addon:FindItemInCache(cache, id, name, link)
     end
 
     -- If not found, check for alternative item IDs (converted item ID).
-    local alt = S2KFI:GetConvertedItemId(id)
+    local alt = nil -- S2KFI:GetConvertedItemId(id) removed
     if alt then
         found = self:GetFromCache(cache, alt)
         if found then
@@ -1555,8 +1467,8 @@ function addon:MakeCache()
     }
 
     -- Preload talents and PvP talents into the cache.
-    self:PreloadTalents(cache.talents, cache.allTalents)
-    self:PreloadPvpTalents(cache.pvpTalents, cache.allPvpTalents)
+    self:PreloadTalents(cache.talents, cache.allTalents, cache.spells)
+    self:PreloadPvpTalents(cache.pvpTalents, cache.allPvpTalents, cache.spells)
     --self:PreloadPvpTalentSpells(cache.spells)  -- This line is commented out, but could be used to preload PvP talent spells.
 
     -- Preload various types of spells into the cache.
@@ -1621,10 +1533,8 @@ function addon:PreloadSpellbook(spells, flyouts)
         local count = skillLineInfo.numSpellBookItems
         local spec = skillLineInfo.specID or 0 -- specID is nil if the skill line isn't tied to a specific spec.
 
-        -- If the skill line isn't associated with a specialization, add it to the tabs list for further processing.
-        if spec == 0 then
-            table.insert(tabs, { type = Enum.SpellBookSpellBank.Player, offset = offset, count = count })
-        end
+        -- Scan all spellbook skill lines to ensure spec-specific spells are captured.
+        table.insert(tabs, { type = Enum.SpellBookSpellBank.Player, offset = offset, count = count })
     end
 
     -- Add profession spells to the tabs list by iterating through all known professions.
@@ -1642,18 +1552,18 @@ function addon:PreloadSpellbook(spells, flyouts)
             local type, id = C_SpellBook.GetSpellBookItemType(index, tab.type)
             local name = C_SpellBook.GetSpellBookItemName(index, tab.type)
 
-            if type == "FLYOUT" then
+            if type == Enum.SpellBookItemType.Flyout or type == "FLYOUT" then
                 -- Cache the flyout information.
                 self:UpdateCache(flyouts, index, id, name)
 
                 -- Cache the spells contained within the flyout.
-                local name, description, numSlots = GetFlyoutInfo(id)
+                local flyoutName, description, numSlots = GetFlyoutInfo(id)
                 for idx = 1, numSlots do
                     local flyoutid, _, isKnown, spellName = GetFlyoutSlotInfo(id, idx)
                     self:UpdateCache(spells, flyoutid, flyoutid, spellName)
                 end
 
-            elseif type == "SPELL" then
+            elseif type == Enum.SpellBookItemType.Spell or type == "SPELL" then
                 -- Cache the spell information.
                 self:UpdateCache(spells, id, id, name)
             end
@@ -1708,26 +1618,68 @@ end
 
 
 -- Preloads the player's selected talents and all available talents into the cache.
-function addon:PreloadTalents(talents, all)
-    -- Iterate through all talent tiers (rows).
-    for tier = 1, MAX_TALENT_TIERS do
-        -- Initialize the cache for each tier if it doesn't already exist.
-        all[tier] = all[tier] or { id = {}, name = {} }
-
-        -- Check if there are talents available in this tier.
-        if GetTalentTierInfo(tier, 1) then
-            -- Iterate through all talent columns (choices in each tier).
-            for column = 1, NUM_TALENT_COLUMNS do
-                -- Retrieve information about the talent in this tier and column.
-                local id, name, _, selected = GetTalentInfo(tier, column, 1)
-
-                -- If the talent is selected, update the cache for selected talents.
-                if selected then
-                    self:UpdateCache(talents, id, id, name)
+function addon:PreloadTalents(talents, all, spells)
+    -- Modern Talent System (Retail 10.0+)
+    if C_Traits and C_ClassTalents then
+        local configID = C_ClassTalents.GetActiveConfigID()
+        if configID then
+            local configInfo = C_Traits.GetConfigInfo(configID)
+            if configInfo then
+                for _, treeID in ipairs(configInfo.treeIDs) do
+                    local nodes = C_Traits.GetTreeNodes(treeID)
+                    for _, nodeID in ipairs(nodes) do
+                        local nodeInfo = C_Traits.GetNodeInfo(configID, nodeID)
+                        if nodeInfo and nodeInfo.ranksPurchased > 0 then
+                            local entryID = nodeInfo.activeEntry and nodeInfo.activeEntry.entryID
+                            if entryID then
+                                local entryInfo = C_Traits.GetEntryInfo(configID, entryID)
+                                if entryInfo and entryInfo.definitionID then
+                                    local definitionInfo = C_Traits.GetDefinitionInfo(entryInfo.definitionID)
+                                    if definitionInfo and definitionInfo.spellID then
+                                        local spellID = definitionInfo.spellID
+                                        local spellInfo = C_Spell.GetSpellInfo(spellID)
+                                        local name = spellInfo and spellInfo.name or "Unknown Talent"
+                                        
+                                        -- Update both talents and spells cache for modern lookups
+                                        self:UpdateCache(talents, nodeID, nodeID, name)
+                                        if spells then
+                                            self:UpdateCache(spells, spellID, spellID, name)
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
                 end
+            end
+        end
+    end
 
-                -- Update the cache for all talents in this tier.
-                self:UpdateCache(all[tier], id, id, name)
+    -- Legacy Talent System Fallback (Classic/Cata)
+    if _G.MAX_TALENT_TIERS and _G.GetTalentTierInfo then
+        local MAX_TALENT_TIERS = _G.MAX_TALENT_TIERS
+        local NUM_TALENT_COLUMNS = _G.NUM_TALENT_COLUMNS or 3
+        
+        -- Iterate through all talent tiers (rows).
+        for tier = 1, MAX_TALENT_TIERS do
+            -- Initialize the cache for each tier if it doesn't already exist.
+            all[tier] = all[tier] or { id = {}, name = {} }
+    
+            -- Check if there are talents available in this tier.
+            if GetTalentTierInfo(tier, 1) then
+                -- Iterate through all talent columns (choices in each tier).
+                for column = 1, NUM_TALENT_COLUMNS do
+                    -- Retrieve information about the talent in this tier and column.
+                    local id, name, _, selected = GetTalentInfo(tier, column, 1)
+    
+                    -- If the talent is selected, update the cache for selected talents.
+                    if selected then
+                        self:UpdateCache(talents, id, id, name)
+                    end
+    
+                    -- Update the cache for all talents in this tier.
+                    self:UpdateCache(all[tier], id, id, name)
+                end
             end
         end
     end
@@ -1735,7 +1687,7 @@ end
 
 
 -- Preloads the player's selected PvP talents and all available PvP talents into the cache.
-function addon:PreloadPvpTalents(pvpTalents, allPvpTalents)
+function addon:PreloadPvpTalents(pvpTalents, allPvpTalents, spells)
     -- Get the player's currently selected PvP talent IDs.
     local pvpTalentIDs = C_SpecializationInfo.GetAllSelectedPvpTalentIDs()
 
@@ -1751,6 +1703,9 @@ function addon:PreloadPvpTalents(pvpTalents, allPvpTalents)
             -- If the talent is available, unlocked, and known, update the cache for selected PvP talents.
             if available and unlocked and known then
                 self:UpdateCache(pvpTalents, id, id, name)
+                if spells and spellID then
+                    self:UpdateCache(spells, spellID, spellID, name)
+                end
             end
         end
 
@@ -1767,22 +1722,6 @@ function addon:PreloadPvpTalents(pvpTalents, allPvpTalents)
     end
 end
 
-
--- function addon:PreloadPvpTalentSpells(spells)
---    local pvpTalentIDs = {}
---    pvpTalentIDs = C_SpecializationInfo.GetAllSelectedPvpTalentIDs()
---    local tier
---    for tier = 1, 3 do
---        if pvpTalentIDs[tier] then
---            if GetPvpTalentInfoByID(pvpTalentIDs[tier]) then
---                local id, name, _, _, available, spellID, unlocked, _, _, known = GetPvpTalentInfoByID(pvpTalentIDs[tier])
---                if available and unlocked and known then
---                    self:UpdateCache(spells, spellID, spellID, name)
---                end
---            end
---        end
---    end
---end
 
 
 -- Preloads equipped items from the player's character into the cache.
@@ -1984,7 +1923,17 @@ end
 
 -- Places a spell into the specified slot, with retries if the initial attempt fails.
 function addon:PlaceSpell(slot, id, link, count)
-    print("Placing spell:", id, "in slot:", slot)  -- Corrected variable name
+    if ABP_DEBUG then print("Placing spell:", id, "in slot:", slot) end
+
+    -- Retail specific: Try the modern placement API first for special spells
+    if C_Spell and C_Spell.PlaceSpellOnActionBar then
+        C_Spell.PlaceSpellOnActionBar(id, slot)
+        -- Verify if it worked (approximate check by looking at action info)
+        local _, placedID = GetActionInfo(slot)
+        if placedID == id then
+            return
+        end
+    end
 
     count = count or ABP_PICKUP_RETRY_COUNT  -- Default to a set number of retry attempts.
 

@@ -1,7 +1,64 @@
+-- ---------------------------------------------------------------------------
+-- Table utility functions (inlined from LibS2kMisc-1.0)
+-- ---------------------------------------------------------------------------
+
+--- Returns an iterator that yields each value of a hash/array table.
+--- Equivalent to `for v in table.s2k_values(t) do`.
+function table.s2k_values(tab, needUnpack)
+    local index
+    return function()
+        local k, v = next(tab, index)
+        if k then
+            index = k
+            if needUnpack then
+                return unpack(v)
+            end
+            return v
+        end
+    end
+end
+
+--- Returns a deep copy of a table (recursive).
+function table.s2k_copy(tab)
+    local ret = {}
+    for k, v in pairs(tab) do
+        if type(v) == "table" then
+            ret[k] = table.s2k_copy(v)
+        else
+            ret[k] = v
+        end
+    end
+    return ret
+end
+
+--- Returns selected fields from a table by index.
+--- e.g. table.s2k_select(t, 1, 3, 5) returns t[1], t[3], t[5]
+function table.s2k_select(tab, ...)
+    local indexes, res = {...}, {}
+    local i = 0
+    for _, j in ipairs(indexes) do
+        i = i + 1
+        res[i] = tab[j]
+    end
+    return unpack(res, 1, i)
+end
+
+--- Work around the WoW API bug where C_PetJournal.GetSearchFilter() did not
+--- return the current search text. We hook Set/Clear to keep our own copy.
+do
+    local saved = { search = "" }
+    hooksecurefunc(C_PetJournal, "ClearSearchFilter", function() saved.search = "" end)
+    hooksecurefunc(C_PetJournal, "SetSearchFilter",   function(text) saved.search = text end)
+    C_PetJournal.GetSearchFilter = function() return saved.search end
+end
+
+-- ---------------------------------------------------------------------------
+
 ABP_DB_VERSION = "v3"
 
 ABP_ADDON_NAME = "Action Bar Profiles"
 ABP_DOWNLOAD_LINK = "https://www.curseforge.com/wow/addons/action-bar-profiles-fan-update"
+ABP_DEBUG_PREFIX = "|cffff0000Debug:|r "
 
 ABP_MAX_ACTION_BUTTONS = 180
 ABP_DEFAULT_PAPERDOLL_NUM_TABS = 3
@@ -167,6 +224,10 @@ ABP_SIMILAR_SPELLS = {
 }
 
 ABP_SPECIAL_SPELLS = {
+    -- random favorite mount
+    [150544] = {},
+    -- zone ability / extra action button
+    [190336] = {},
     -- draenor zone ability
     [161691] = {
         level = 90,

@@ -1,8 +1,8 @@
-## Interface: 110000, 110002
+## Interface: 110007, 120000, 120005
 ## Title: Action Bar Profiles
-## Author: Rhodan
+## Author: Rhodan, Kaarosu
 ## SavedVariables: ActionBarProfilesDBv3
-## Version: 11.0.2.1
+## Version: 12.0.5.1
 
 ActionBarProfiles.xml
 

@@ -1,7 +1,17 @@
 local addonName, addon = ...
 ABP = ABP or {}
 local L = LibStub("AceLocale-3.0"):GetLocale(addonName)
-local DEBUG = "|cffff0000Debug:|r "
+local DEBUG = ABP_DEBUG_PREFIX
+
+-- Localize globals for performance
+local select, tonumber, tostring, type, pairs, unpack = select, tonumber, tostring, type, pairs, unpack
+local format = string.format
+local UnitClass, GetSpecializationInfo, GetSpecialization = UnitClass, GetSpecializationInfo, GetSpecialization
+local GetActionInfo, GetActionText, GetMacroIndexByName, GetMacroInfo, GetNumMacros = GetActionInfo, GetActionText, GetMacroIndexByName, GetMacroInfo, GetNumMacros
+local GetPetActionInfo, GetBinding, GetNumBindings, GetBindingKey = GetPetActionInfo, GetBinding, GetNumBindings, GetBindingKey
+local C_SpellBook, C_Spell, C_Item, C_PetJournal, C_MountJournal, C_AddOns, C_ClassTalents, C_Traits, C_Container, C_EquipmentSet, C_ToyBox = C_SpellBook, C_Spell, C_Item, C_PetJournal, C_MountJournal, C_AddOns, C_ClassTalents, C_Traits, C_Container, C_EquipmentSet, C_ToyBox
+local Enum = Enum
+local bit = bit
 
 -- Tries to guess a unique name for a new profile.
 -- If the provided name is not in use, it returns that name.
@@ -37,7 +47,7 @@ function addon:SaveProfile(name, options)
     end
 
     -- Debug: Log the name of the profile being saved
-    self:Printf("Debug: Saving profile %s with specID %s", name, tostring(profile.specID))
+    if ABP_DEBUG then self:Printf("Debug: Saving profile %s with specID %s", name, tostring(profile.specID)) end
 
     -- Update the profile with talents, actions, and other necessary data
     self:UpdateProfileOptions(profile, options, true)
@@ -158,111 +168,38 @@ function addon:SaveActions(profile)
     ---@class SpellBookSkillLineInfo
     ---@field itemIndexOffset number
 
-    for skillLineIndex = 1, C_SpellBook.GetNumSpellBookSkillLines() do
-        local skillLineInfo = C_SpellBook.GetSpellBookSkillLineInfo(skillLineIndex)
-        local offset = skillLineInfo.itemIndexOffset
-        local count = skillLineInfo.numSpellBookItems
-        local spec = skillLineInfo.specID or 0
+    if C_SpellBook and C_SpellBook.GetNumSpellBookSkillLines then
+        for skillLineIndex = 1, C_SpellBook.GetNumSpellBookSkillLines() do
+            local skillLineInfo = C_SpellBook.GetSpellBookSkillLineInfo(skillLineIndex)
+            local offset = skillLineInfo.itemIndexOffset
+            local count = skillLineInfo.numSpellBookItems
+            local spec = skillLineInfo.specID or 0
 
-        if spec == 0 then
-            for index = offset + 1, offset + count do
-            ---@type Enum.SpellBookSpellBank
-            local spellBookBankType = Enum.SpellBookSpellBank.Player
-                local type, id = C_SpellBook.GetSpellBookItemType(index, Enum.SpellBookSpellBank.Player)
-                local name = C_SpellBook.GetSpellBookItemName(index, Enum.SpellBookSpellBank.Player)
+            if spec == 0 then
+                for index = offset + 1, offset + count do
+                    local type, id = C_SpellBook.GetSpellBookItemType(index, Enum.SpellBookSpellBank.Player)
+                    local name = C_SpellBook.GetSpellBookItemName(index, Enum.SpellBookSpellBank.Player)
 
-                if type == "FLYOUT" then
-                    flyouts[id] = name
-                elseif type == "SPELL" and C_SpellBook.IsClassTalentSpellBookItem(index, Enum.SpellBookSpellBank.Player) then
-                    tsNames[name] = id
-                elseif type == "SPELL" and C_SpellBook.IsPvPTalentSpellBookItem(index, Enum.SpellBookSpellBank.Player) then
-                    tsNames[name] = id
-                end
-            end
-        end
-    end
-
-    local talents = {}
-    local configID = C_ClassTalents.GetActiveConfigID()
-    if not configID then return end
-
-    ---@class TraitConfigInfo
-    ---@field ID number
-    ---@field type Enum.TraitConfigType
-    ---@field name string
-    ---@field treeIDs number[]
-    ---@field usesSharedActionBars boolean
-
-    local configInfo = C_Traits.GetConfigInfo(configID) ---@type TraitConfigInfo
-    if not configInfo or not configInfo.treeIDs then return end
-
-    for _, treeID in ipairs(configInfo.treeIDs) do
-        local nodes = C_Traits.GetTreeNodes(treeID)
-
-        for _, nodeID in ipairs(nodes) do
-            local nodeInfo = C_Traits.GetNodeInfo(configID, nodeID)
-
-            for _, entryID in pairs(nodeInfo.entryIDsWithCommittedRanks) do
-                local entryInfo = C_Traits.GetEntryInfo(configID, entryID)
-
-                ---@class TraitEntryInfo
-                ---@field entryID number
-                ---@field rank number
-                ---@field definitionID number
-                if entryInfo and entryInfo.definitionID then
-                    local definitionInfo = C_Traits.GetDefinitionInfo(entryInfo.definitionID)
-
-                    ---@class TraitDefinitionInfo
-                    ---@field spellID number
-                    if definitionInfo.spellID then
-                        local spellInfo = C_Spell.GetSpellInfo(definitionInfo.spellID)
-                        if spellInfo and spellInfo.name then
-                            local isFreeTalent = nodeInfo.currentRank > 0 and nodeInfo.ranksPurchased == 0 and not nodeInfo.canPurchaseRank
-                            talents[#talents + 1] = {
-                                nodeID = nodeInfo.ID,
-                                entryID = entryID,
-                                spellID = definitionInfo.spellID,
-                                spellName = spellInfo.name,
-                                ranksPurchased = nodeInfo.ranksPurchased,
-                                maxRanks = nodeInfo.maxRanks,
-                                isSelectionNode = #nodeInfo.entryIDs > 1,
-                                posX = nodeInfo.posX,
-                                posY = nodeInfo.posY,
-                                --row = nodeInfo.row,   -- "row" and "column" are not part of officially documented field within TraitNodeInfo
-                                --column = nodeInfo.column,
-                                isFreeTalent = isFreeTalent or false -- Flag to identify free talents
-                            }
-                        else
-                            print("Warning: Unable to retrieve spell information for spellID:", definitionInfo.spellID)
-                        end
+                    if type == "FLYOUT" then
+                        flyouts[id] = name
+                    elseif type == "SPELL" and C_SpellBook.IsClassTalentSpellBookItem(index, Enum.SpellBookSpellBank.Player) then
+                        tsNames[name] = id
+                    elseif type == "SPELL" and C_SpellBook.IsPvPTalentSpellBookItem(index, Enum.SpellBookSpellBank.Player) then
+                        tsNames[name] = id
                     end
                 end
             end
         end
     end
 
-    -- Sort talents by vertical position (posY) to ensure proper order of unlocking
-    table.sort(talents, function(a, b) return a["posY"] < b["posY"] end)
-    profile.talents = talents  -- Save the talents in the profile
-
-    -- Save PvP talents and their associated spell links
-    local pvpTalentIDs, pvpTalents, pvpTalentSpells = {}, {}, {}
-    pvpTalentIDs = C_SpecializationInfo.GetAllSelectedPvpTalentIDs()
-
-    for tier = 1, #pvpTalentIDs do
-        -- Save the PvP Talent Link
-        ---@diagnostic disable-next-line: redundant-parameter
-        pvpTalents[tier] = GetPvpTalentLink(pvpTalentIDs[tier])
-        --print("pvpTalents [Tier] are: " .. pvpTalents[tier])
-
-        -- Retrieve spell info and save the spell link using the new API
-        local id = select(6, GetPvpTalentInfoByID(pvpTalentIDs[tier]))
-        pvpTalentSpells[tier] = C_Spell.GetSpellLink(id)
+    -- Generate Talent Output String for saving config securely
+    if C_ClassTalents and C_ClassTalents.GetActiveConfigID and C_Traits and C_Traits.GenerateImportString then
+        local configID = C_ClassTalents.GetActiveConfigID()
+        if configID then
+            local talentString = C_Traits.GenerateImportString(configID)
+            profile.talentString = (talentString and talentString ~= "") and talentString or nil
+        end
     end
-
-    profile.pvpTalentsIds = pvpTalentIDs  -- Save PvP talent IDs in the profile
-    profile.pvpTalents = pvpTalents  -- Save PvP talent links in the profile
-    profile.pvpTalentSpells = pvpTalentSpells  -- Save PvP talent spell links in the profile
 
     -- Save actions on the player's action bars
     local actions = {}
@@ -306,11 +243,11 @@ function addon:SaveActions(profile)
             end
 
         elseif type == "companion" then
-            if sub == "MOUNT" and id then
-                actions[slot] = C_Spell.GetSpellLink(id)  -- Save mount spell link
+            if id then
+                actions[slot] = C_Spell.GetSpellLink(id)  -- Save companion spell link
             else
-                -- Handle the case where id is nil or sub is not "MOUNT"
-                actions[slot] = "|cffff0000|Habp:companion:0|h[Unknown Mount]|h|r"
+                -- Handle the case where id is nil
+                actions[slot] = "|cffff0000|Habp:companion:0|h[Unknown Companion]|h|r"
             end
 
         elseif type == "summonpet" then
@@ -322,12 +259,12 @@ function addon:SaveActions(profile)
             end
 
         elseif type == "summonmount" then
-            if id == 0xFFFFFFF then
+            if id == 0xFFFFFFF or id == 0 then
                 actions[slot] = C_Spell.GetSpellLink(ABP_RANDOM_MOUNT_SPELL_ID)  -- Save random mount spell link
             elseif id then  -- Ensure id is not nil before using it
-                local mountInfo = C_MountJournal.GetMountInfoByID(id)
-                if mountInfo and mountInfo[2] then
-                    actions[slot] = C_Spell.GetSpellLink(mountInfo[2])  -- Save specific mount spell link
+                local _, spellID = C_MountJournal.GetMountInfoByID(id)
+                if spellID then
+                    actions[slot] = C_Spell.GetSpellLink(spellID)  -- Save specific mount spell link
                 else
                     -- Handle the case where mountInfo or the specific mount ID is nil
                     actions[slot] = "|cffff0000|Habp:summonmount:0|h[Unknown Mount]|h|r"
@@ -371,6 +308,12 @@ function addon:SaveActions(profile)
             actions[slot] = string.format(
                 "|cffff0000|Habp:equip|h[%s]|h|r",
                 id  -- Save equipment set ID
+            )
+        elseif type == "action" then
+            -- Handle generic Blizzard actions (like Extra Action Button or Zone Ability)
+            actions[slot] = string.format(
+                "|cffff0000|Habp:action:%d|h[Action %d]|h|r",
+                id, id
             )
         end
     end
