@@ -1,5 +1,5 @@
 local addonName, addon = ...
-ABP = ABP or {}
+ABP = _G.ABP or addon or ABP or {}
 local L = LibStub("AceLocale-3.0"):GetLocale(addonName)
 
 -- Localize globals for performance
@@ -7,7 +7,6 @@ local ipairs, select, unpack = ipairs, select, unpack
 local UnitClass, UnitName, GetRealmName, GetSpecialization, GetSpecializationInfo = UnitClass, UnitName, GetRealmName, GetSpecialization, GetSpecializationInfo
 local InCombatLockdown = InCombatLockdown
 local CreateFrame = CreateFrame
-local CharacterFrameInsetRight = CharacterFrameInsetRight
 local HybridScrollFrame_OnLoad, HybridScrollFrame_CreateButtons, HybridScrollFrame_Update, HybridScrollFrame_GetOffset = HybridScrollFrame_OnLoad, HybridScrollFrame_CreateButtons, HybridScrollFrame_Update, HybridScrollFrame_GetOffset
 local UIErrorsFrame = UIErrorsFrame
 local ERR_CLIENT_LOCKED_OUT = ERR_CLIENT_LOCKED_OUT
@@ -22,25 +21,57 @@ frame.scrollBar = frame.scrollBar or CreateFrame("ScrollFrame", nil, frame)
 
 local ACTION_BAR_PROFILE_BUTTON_HEIGHT = 44
 
+local function GetCurrentSpecID()
+    if type(GetSpecialization) == "function" then
+        local specIndex = GetSpecialization()
+        if specIndex and type(GetSpecializationInfo) == "function" then
+            local specID = GetSpecializationInfo(specIndex)
+            if specID then
+                return specID
+            end
+        end
+    end
+    return 0
+end
+
 -- This function initializes the main frame for the GUI, setting up the scroll bar, frame levels, and buttons.
 function frame:OnInitialize()
-    -- Prevent the scrollbar from hiding when there are fewer items than it can display
-    self.scrollBar.doNotHide = 1
+    -- Ensure proper parenting to PaperDollFrame if available
+    if PaperDollFrame and self:GetParent() ~= PaperDollFrame then
+        self:SetParent(PaperDollFrame)
+    end
 
-    -- Set the frame level to be above the Character Frame Inset Right
-    self:SetFrameLevel(CharacterFrameInsetRight:GetFrameLevel() + 1)
+    local insetRight = CharacterFrameInsetRight or _G["CharacterFrameInsetRight"]
+    if insetRight and insetRight.GetFrameLevel then
+        self:SetFrameLevel(insetRight:GetFrameLevel() + 1)
+        self:ClearAllPoints()
+        self:SetPoint("TOPLEFT", insetRight, "TOPLEFT", 4, -4)
+        self:SetPoint("BOTTOMRIGHT", insetRight, "BOTTOMRIGHT", -4, 4)
+    else
+        self:SetFrameLevel(2)
+    end
+
+    -- Prevent the scrollbar from hiding when there are fewer items than it can display
+    if self.scrollBar then
+        self.scrollBar.doNotHide = 1
+    end
 
     -- Ensure the "Use Profile" and "Save Profile" buttons are displayed above the main frame
-    self.UseProfile:SetFrameLevel(self:GetFrameLevel() + 3)
-    self.SaveProfile:SetFrameLevel(self:GetFrameLevel() + 3)
+    if self.UseProfile then
+        self.UseProfile:SetFrameLevel(self:GetFrameLevel() + 3)
+    end
+    if self.SaveProfile then
+        self.SaveProfile:SetFrameLevel(self:GetFrameLevel() + 3)
+    end
 
     -- Initialize the scroll frame with hybrid scrolling capabilities
     HybridScrollFrame_OnLoad(self)
     self.update = function() self:Update() end
 
     -- Create buttons for the scroll frame using the "ActionBarProfileButtonTemplate"
-    -- The buttons are offset by the height of the Search Box and Action buttons plus margins
-    HybridScrollFrame_CreateButtons(self, "ActionBarProfileButtonTemplate", 2, -(self.SearchBox:GetHeight() + self.UseProfile:GetHeight() + 8))
+    local searchH = (self.SearchBox and self.SearchBox:GetHeight()) or 20
+    local useH = (self.UseProfile and self.UseProfile:GetHeight()) or 22
+    HybridScrollFrame_CreateButtons(self, "ActionBarProfileButtonTemplate", 2, -(searchH + useH + 8))
 end
 
 
@@ -49,38 +80,50 @@ end
 function frame:OnShow()
     -- Refresh the list of profiles
     self:Update()
-
-    -- -- Attempt to use the currently selected profile -- THIS IS BEING COMMENTED OUT AS PROFILE WOULD BE USED PREMATURELY WHEN IT MAY NOT HAVE BEEN WARRANTED!
-    -- local selectedProfile = self.selectedProfile
-    -- if selectedProfile then
-        -- addon:UseProfile(selectedProfile)
-    -- else
-        -- print("No profile selected")
-    -- end
 end
 
 
 -- This function is called when the frame is hidden, ensuring the "Save Dialog" is also hidden.
 function frame:OnHide()
-    PaperDollActionBarProfilesSaveDialog:Hide()
+    if PaperDollActionBarProfilesSaveDialog then
+        PaperDollActionBarProfilesSaveDialog:Hide()
+    end
 end
 
 
+local playerClass
+local updateThrottle = 0
+
 -- This function is called to update the frame's content, particularly the state of the buttons.
-function frame:OnUpdate()
-    local class = select(2, UnitClass("player"))  -- Get the player's class
+function frame:OnUpdate(elapsed)
+    updateThrottle = updateThrottle + (elapsed or 0.05)
+    if updateThrottle < 0.05 then return end
+    updateThrottle = 0
 
-    -- Ensure that self.buttons is initialized
-    self.buttons = self.buttons or {}
+    if not playerClass then
+        playerClass = select(2, UnitClass("player"))
+    end
 
-    -- Iterate over each button in the scroll frame
-    local button
-    for button in table.s2k_values(self.buttons) do
+    local buttons = self.buttons
+    if not buttons then return end
+
+    -- Resize the ScrollChild dynamically so the buttons can stretch to fill the pane's full width.
+    if self.scrollChild then
+        self.scrollChild:SetWidth(self:GetWidth())
+    end
+
+    -- Iterate over each button using indexed access to avoid allocating closure objects
+    for i = 1, #buttons do
+        local button = buttons[i]
+        
+        -- Also force the button to stretch if HybridScrollFrame ignored our XML anchors
+        button:SetWidth(self:GetWidth())
+        
         -- Check if the button is currently being hovered over by the mouse
         if button:IsMouseOver() then
             -- Show or hide the favorite, delete, and edit buttons based on the button's state
             if button.name then
-                if button.UnfavButton:IsShown() or button.class ~= class then
+                if button.UnfavButton:IsShown() or button.class ~= playerClass then
                     button.FavButton:Hide()
                 else
                     button.FavButton:Show()
@@ -133,6 +176,11 @@ end
 
 -- This function handles what happens when a profile button is double-clicked.
 function frame:OnProfileDoubleClick(button)
+    if InCombatLockdown() then
+        UIErrorsFrame:AddMessage(ERR_CLIENT_LOCKED_OUT, 1.0, 0.1, 0.1, 1.0)
+        return
+    end
+
     if button.name then
         -- When a profile is double-clicked, first handle it as a single click
         self:OnProfileClick(button)
@@ -144,6 +192,13 @@ end
 
 -- This function attempts to use the currently selected profile.
 function frame:OnUseClick()
+    if InCombatLockdown() then
+        UIErrorsFrame:AddMessage(ERR_CLIENT_LOCKED_OUT, 1.0, 0.1, 0.1, 1.0)
+        return
+    end
+
+    if not self.selected then return end
+
     -- Create a cache of the current state for efficiency
     local cache = addon:MakeCache()
 
@@ -175,13 +230,22 @@ end
 
 -- This function handles the logic when the save button is clicked.
 function frame:OnSaveClick()
+    if InCombatLockdown() then
+        UIErrorsFrame:AddMessage(ERR_CLIENT_LOCKED_OUT, 1.0, 0.1, 0.1, 1.0)
+        return
+    end
+
+    if not self.selected then
+        -- If no profile is selected, open the save dialog to create a new profile
+        PaperDollActionBarProfilesSaveDialog:SetProfile(nil)
+        PaperDollActionBarProfilesSaveDialog:Show()
+        return
+    end
+
     -- Show a confirmation popup before saving the profile.
-    -- If the client is locked out (e.g., during combat), display an error message instead.
+    -- Confirmation is handled in Dialogs.lua OnSaveConfirm.
     if not addon:ShowPopup("CONFIRM_SAVE_ACTION_BAR_PROFILE", self.selected, nil, { name = self.selected }) then
         UIErrorsFrame:AddMessage(ERR_CLIENT_LOCKED_OUT, 1.0, 0.1, 0.1, 1.0)
-    else
-        -- Assuming `self.selected` is the profile name, we save the profile
-        addon:SaveProfile(self.selected)
     end
 end
 
@@ -200,9 +264,9 @@ end
 -- This function handles the logic when the "favorite" button is clicked on a profile.
 function frame:OnFavClick(button)
     -- Get the current player's name and realm to create a unique identifier.
-    local player = UnitName("player") .. "-" .. GetRealmName()
+    local player = UnitName("player") .. "-" .. (GetRealmName() or "")
     -- Get the current specialization of the player.
-    local spec = GetSpecializationInfo(GetSpecialization())
+    local spec = GetCurrentSpecID()
 
     -- Set the clicked profile as the default for the player's current spec.
     addon:SetDefault(button.name, player .. "-" .. spec)
@@ -212,9 +276,9 @@ end
 -- This function handles the logic when the "unfavorite" button is clicked on a profile.
 function frame:OnUnfavClick(button)
     -- Get the current player's name and realm to create a unique identifier.
-    local player = UnitName("player") .. "-" .. GetRealmName()
+    local player = UnitName("player") .. "-" .. (GetRealmName() or "")
     -- Get the current specialization of the player.
-    local spec = GetSpecializationInfo(GetSpecialization())
+    local spec = GetCurrentSpecID()
 
     -- Unset the clicked profile as the default for the player's current spec.
     addon:UnsetDefault(button.name, player .. "-" .. spec)
@@ -229,7 +293,7 @@ function frame:Update()
 
     -- Filter profiles based on the search text
     for _, profile in ipairs(allProfiles) do
-        if searchText == "" or profile.name:lower():find(searchText, 1, true) then
+        if profile and profile.name and (searchText == "" or profile.name:lower():find(searchText, 1, true)) then
             table.insert(profiles, profile)
         end
     end
@@ -244,9 +308,9 @@ function frame:Update()
     local offset = HybridScrollFrame_GetOffset(self)
 
     -- Get the current player information.
-    local player = UnitName("player") .. "-" .. GetRealmName()
+    local player = UnitName("player") .. "-" .. (GetRealmName() or "")
     local class = select(2, UnitClass("player"))
-    local spec = GetSpecializationInfo(GetSpecialization())
+    local spec = GetCurrentSpecID()
 
     -- Rebuild the cache only if it's marked as dirty (e.g., after an event update) or if it doesn't exist yet.
     if addon.cacheDirty or not self.cachedData then

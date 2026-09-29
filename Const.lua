@@ -1,3 +1,5 @@
+local addonName, addon = ...
+
 -- ---------------------------------------------------------------------------
 -- Table utility functions (inlined from LibS2kMisc-1.0)
 -- ---------------------------------------------------------------------------
@@ -43,13 +45,24 @@ function table.s2k_select(tab, ...)
     return unpack(res, 1, i)
 end
 
---- Work around the WoW API bug where C_PetJournal.GetSearchFilter() did not
---- return the current search text. We hook Set/Clear to keep our own copy.
+--- Keep a local copy of pet search filter without overwriting C_PetJournal table
 do
     local saved = { search = "" }
-    hooksecurefunc(C_PetJournal, "ClearSearchFilter", function() saved.search = "" end)
-    hooksecurefunc(C_PetJournal, "SetSearchFilter",   function(text) saved.search = text end)
-    C_PetJournal.GetSearchFilter = function() return saved.search end
+    if C_PetJournal and hooksecurefunc then
+        if C_PetJournal.ClearSearchFilter then
+            hooksecurefunc(C_PetJournal, "ClearSearchFilter", function() saved.search = "" end)
+        end
+        if C_PetJournal.SetSearchFilter then
+            hooksecurefunc(C_PetJournal, "SetSearchFilter", function(text) saved.search = text or "" end)
+        end
+    end
+    function addon:GetPetJournalSearchFilter()
+        if C_PetJournal and C_PetJournal.GetSearchFilter then
+            local text = C_PetJournal.GetSearchFilter()
+            if text and text ~= "" then return text end
+        end
+        return saved.search or ""
+    end
 end
 
 -- ---------------------------------------------------------------------------
@@ -62,6 +75,18 @@ ABP_DEBUG_PREFIX = "|cffff0000Debug:|r "
 
 ABP_MAX_ACTION_BUTTONS = 180
 ABP_DEFAULT_PAPERDOLL_NUM_TABS = 3
+
+-- Macro limits: In modern Retail WoW, MAX_ACCOUNT_MACROS was moved to Constants.MacroConsts
+ABP_MAX_ACCOUNT_MACROS = (Constants and Constants.MacroConsts and Constants.MacroConsts.MAX_ACCOUNT_MACROS) or _G.MAX_ACCOUNT_MACROS or 120
+ABP_MAX_CHARACTER_MACROS = (Constants and Constants.MacroConsts and Constants.MacroConsts.MAX_CHARACTER_MACROS) or _G.MAX_CHARACTER_MACROS or 30
+
+-- Ensure globals exist for any legacy references or unlocalized calls
+if not _G.MAX_ACCOUNT_MACROS then
+    _G.MAX_ACCOUNT_MACROS = ABP_MAX_ACCOUNT_MACROS
+end
+if not _G.MAX_CHARACTER_MACROS then
+    _G.MAX_CHARACTER_MACROS = ABP_MAX_CHARACTER_MACROS
+end
 
 ABP_PICKUP_RETRY_COUNT = 5
 ABP_PICKUP_RETRY_INTERVAL = 0.1
@@ -226,7 +251,7 @@ ABP_SIMILAR_SPELLS = {
 ABP_SPECIAL_SPELLS = {
     -- random favorite mount
     [150544] = {},
-    -- zone ability / extra action button
+    -- zone ability / extra action button (often called the 'assistant')
     [190336] = {},
     -- draenor zone ability
     [161691] = {

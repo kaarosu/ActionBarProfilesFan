@@ -1,5 +1,5 @@
 local addonName, addon = ...
-ABP = ABP or {}
+ABP = _G.ABP or addon or ABP or {}
 local L = LibStub("AceLocale-3.0"):GetLocale(addonName)
 local DEBUG = ABP_DEBUG_PREFIX
 
@@ -9,9 +9,12 @@ local format = string.format
 local UnitClass, GetSpecializationInfo, GetSpecialization = UnitClass, GetSpecializationInfo, GetSpecialization
 local GetActionInfo, GetActionText, GetMacroIndexByName, GetMacroInfo, GetNumMacros = GetActionInfo, GetActionText, GetMacroIndexByName, GetMacroInfo, GetNumMacros
 local GetPetActionInfo, GetBinding, GetNumBindings, GetBindingKey = GetPetActionInfo, GetBinding, GetNumBindings, GetBindingKey
-local C_SpellBook, C_Spell, C_Item, C_PetJournal, C_MountJournal, C_AddOns, C_ClassTalents, C_Traits, C_Container, C_EquipmentSet, C_ToyBox = C_SpellBook, C_Spell, C_Item, C_PetJournal, C_MountJournal, C_AddOns, C_ClassTalents, C_Traits, C_Container, C_EquipmentSet, C_ToyBox
+local C_SpellBook, C_Spell, C_Item, C_Container = ABP.Compat.C_SpellBook, ABP.Compat.C_Spell, ABP.Compat.C_Item, ABP.Compat.C_Container
+local C_PetJournal, C_MountJournal, C_AddOns, C_ClassTalents, C_Traits, C_EquipmentSet, C_ToyBox, C_TransmogOutfitInfo, C_AssistedCombat, C_ActionBar = C_PetJournal, C_MountJournal, C_AddOns, C_ClassTalents, C_Traits, C_EquipmentSet, C_ToyBox, C_TransmogOutfitInfo, C_AssistedCombat, C_ActionBar
 local Enum = Enum
 local bit = bit
+local MAX_ACCOUNT_MACROS = (Constants and Constants.MacroConsts and Constants.MacroConsts.MAX_ACCOUNT_MACROS) or _G.MAX_ACCOUNT_MACROS or ABP_MAX_ACCOUNT_MACROS or 120
+local MAX_CHARACTER_MACROS = (Constants and Constants.MacroConsts and Constants.MacroConsts.MAX_CHARACTER_MACROS) or _G.MAX_CHARACTER_MACROS or ABP_MAX_CHARACTER_MACROS or 30
 
 -- Tries to guess a unique name for a new profile.
 -- If the provided name is not in use, it returns that name.
@@ -36,15 +39,16 @@ end
 -- Saves a profile with the specified name and options.
 -- Updates the profile options and GUI, and prints a message indicating that the profile has been saved.
 function addon:SaveProfile(name, options)
+    if not name or name == "" then
+        self:Printf("Error: Profile name cannot be empty.")
+        return
+    end
+
     local list = self.db.profile.list  -- Retrieve the list of profiles.
     local profile = list[name] or { name = name }  -- Retrieve existing profile or create a new one with the given name.
 
-    -- Save the current specID
-    profile.specID = GetSpecializationInfo(GetSpecialization())
-    if not profile.specID then
-        self:Printf("Error: Unable to save profile, specID is missing or invalid.")
-        return
-    end
+    -- Save the current specID (falls back to 0 for unspecialized / low-level characters)
+    profile.specID = (type(GetSpecialization) == "function" and GetSpecialization() and type(GetSpecializationInfo) == "function" and GetSpecializationInfo(GetSpecialization())) or 0
 
     -- Debug: Log the name of the profile being saved
     if ABP_DEBUG then self:Printf("Debug: Saving profile %s with specID %s", name, tostring(profile.specID)) end
@@ -111,9 +115,10 @@ function addon:UpdateProfile(profile, quiet)
 
     -- Set the profile's class and icon based on the current player's data.
     profile.class = select(2, UnitClass("player"))
-    profile.icon  = select(4, GetSpecializationInfo(GetSpecialization()))
+    profile.icon  = (type(GetSpecialization) == "function" and GetSpecialization() and type(GetSpecializationInfo) == "function" and select(4, GetSpecializationInfo(GetSpecialization()))) or nil
 
-    -- Save the profile's actions, pet actions, and bindings.
+    -- Save the profile's talents, actions, pet actions, and bindings.
+    self:SaveTalents(profile)
     self:SaveActions(profile)
     self:SavePetActions(profile)
     self:SaveBindings(profile)
@@ -161,6 +166,54 @@ function addon:DeleteProfile(name)
 end
 
 
+-- This function saves the player's current talent setup into the provided profile.
+function addon:SaveTalents(profile)
+    if not (C_ClassTalents and C_Traits and C_ClassTalents.GetActiveConfigID) then
+        return
+    end
+
+    local configID = C_ClassTalents.GetActiveConfigID()
+    if not configID then return end
+
+    local configInfo = C_Traits.GetConfigInfo(configID)
+    profile.talentLoadoutID = configID
+    profile.talentLoadoutName = configInfo and configInfo.name or nil
+
+    if C_Traits.GenerateImportString then
+        local talentString = C_Traits.GenerateImportString(configID)
+        profile.talentString = (talentString and talentString ~= "") and talentString or nil
+    end
+
+    -- Save individual active talent nodes as structured fallback
+    local savedTalents = {}
+    if configInfo and configInfo.treeIDs then
+        for _, treeID in ipairs(configInfo.treeIDs) do
+            local nodes = C_Traits.GetTreeNodes(treeID)
+            if nodes then
+                for _, nodeID in ipairs(nodes) do
+                    local nodeInfo = C_Traits.GetNodeInfo(configID, nodeID)
+                    if nodeInfo and nodeInfo.ranksPurchased and nodeInfo.ranksPurchased > 0 then
+                        local isSelection = (nodeInfo.type == Enum.TraitNodeType.Selection or nodeInfo.type == 2)
+                        local entryID = (nodeInfo.activeEntry and nodeInfo.activeEntry.entryID)
+                            or (nodeInfo.entryIDs and nodeInfo.entryIDs[1])
+                        table.insert(savedTalents, {
+                            nodeID = nodeID,
+                            entryID = entryID,
+                            ranksPurchased = nodeInfo.ranksPurchased,
+                            isSelectionNode = isSelection,
+                            isFreeTalent = (nodeInfo.currentRank > 0 and nodeInfo.ranksPurchased == 0),
+                            posX = nodeInfo.posX,
+                            posY = nodeInfo.posY,
+                        })
+                    end
+                end
+            end
+        end
+    end
+    profile.talents = savedTalents
+end
+
+
 -- This function saves the player's current action bar setup into the provided profile.
 function addon:SaveActions(profile)
     local flyouts, tsNames, tsIds = {}, {}, {}
@@ -180,24 +233,18 @@ function addon:SaveActions(profile)
                     local type, id = C_SpellBook.GetSpellBookItemType(index, Enum.SpellBookSpellBank.Player)
                     local name = C_SpellBook.GetSpellBookItemName(index, Enum.SpellBookSpellBank.Player)
 
-                    if type == "FLYOUT" then
+                    local isFlyout = (type == Enum.SpellBookItemType.Flyout or type == "FLYOUT" or type == 3)
+                    local isSpell = (type == Enum.SpellBookItemType.Spell or type == "SPELL" or type == 0)
+
+                    if isFlyout then
                         flyouts[id] = name
-                    elseif type == "SPELL" and C_SpellBook.IsClassTalentSpellBookItem(index, Enum.SpellBookSpellBank.Player) then
+                    elseif isSpell and C_SpellBook.IsClassTalentSpellBookItem(index, Enum.SpellBookSpellBank.Player) then
                         tsNames[name] = id
-                    elseif type == "SPELL" and C_SpellBook.IsPvPTalentSpellBookItem(index, Enum.SpellBookSpellBank.Player) then
+                    elseif isSpell and C_SpellBook.IsPvPTalentSpellBookItem(index, Enum.SpellBookSpellBank.Player) then
                         tsNames[name] = id
                     end
                 end
             end
-        end
-    end
-
-    -- Generate Talent Output String for saving config securely
-    if C_ClassTalents and C_ClassTalents.GetActiveConfigID and C_Traits and C_Traits.GenerateImportString then
-        local configID = C_ClassTalents.GetActiveConfigID()
-        if configID then
-            local talentString = C_Traits.GenerateImportString(configID)
-            profile.talentString = (talentString and talentString ~= "") and talentString or nil
         end
     end
 
@@ -211,18 +258,32 @@ function addon:SaveActions(profile)
     for slot = 1, ABP_MAX_ACTION_BUTTONS do
         local type, id, sub = GetActionInfo(slot)  -- Retrieve action info for the slot
 
-        if type == "spell" then
-            if tsIds[id] then
-                actions[slot] = GetTalentLink(tsIds[id])
-            elseif id then
+        local isAssistedCombat = (sub == "assistedcombat") or
+            (C_ActionBar and C_ActionBar.IsAssistedCombatAction and C_ActionBar.IsAssistedCombatAction(slot))
+
+        if isAssistedCombat then
+            -- Handle Single-Button Assistant (Assisted Combat Rotation)
+            local assistantSpellID = (C_AssistedCombat and C_AssistedCombat.GetActionSpell and C_AssistedCombat.GetActionSpell()) or id
+            local name = _G.ASSISTED_COMBAT_ROTATION or "Single-Button Assistant"
+            actions[slot] = string.format(
+                "|cffff0000|Habp:assistedcombat:%d|h[%s]|h|r",
+                assistantSpellID or 0, name
+            )
+
+        elseif type == "spell" then
+            if id then
                 actions[slot] = C_Spell.GetSpellLink(id)  -- Save spell link
             end
 
         elseif type == "flyout" then
-            if flyouts[id] then
+            local flyoutName = flyouts[id]
+            if not flyoutName and GetFlyoutInfo then
+                flyoutName = select(1, GetFlyoutInfo(id))
+            end
+            if flyoutName then
                 actions[slot] = string.format(
                     "|cffff0000|Habp:flyout:%d|h[%s]|h|r",
-                    id, flyouts[id]
+                    id, flyoutName
                 )
             end
 
@@ -315,6 +376,19 @@ function addon:SaveActions(profile)
                 "|cffff0000|Habp:action:%d|h[Action %d]|h|r",
                 id, id
             )
+        elseif type == "outfit" then
+            -- Handle Transmog Outfit actions on action bars
+            local outfitName = "Unknown Outfit"
+            if id and C_TransmogOutfitInfo and C_TransmogOutfitInfo.GetOutfitInfo then
+                local outfitInfo = C_TransmogOutfitInfo.GetOutfitInfo(id)
+                if outfitInfo and outfitInfo.name then
+                    outfitName = outfitInfo.name
+                end
+            end
+            actions[slot] = string.format(
+                "|cffff0000|Habp:outfit:%s|h[%s]|h|r",
+                tostring(id or 0), outfitName
+            )
         end
     end
 
@@ -366,31 +440,34 @@ function addon:SavePetActions(profile)
         -- Iterate through all pet spells.
         for index = 1, numPetSpells do
             -- Get the spell type and ID from the pet spellbook.
-            local type, id = C_SpellBook.GetSpellBookItemType(index, Enum.SpellBookSpellBank.Pet)
+            local itemType, actionID, spellID = C_SpellBook.GetSpellBookItemType(index, Enum.SpellBookSpellBank.Pet)
             -- Get the spell name and subname (if any).
             local name, subName = C_SpellBook.GetSpellBookItemName(index, Enum.SpellBookSpellBank.Pet)
+            local id = spellID or actionID
 
-            id = bit.band(id, 0xFFFFFF)  -- Mask the spell ID to ensure it's a valid ID.
-
-            petSpells[name] = id  -- Store the spell ID by its name.
+            if id and name then
+                id = bit.band(id, 0xFFFFFF)  -- Mask the spell ID to ensure it's a valid ID.
+                petSpells[name] = id  -- Store the spell ID by its name.
+            end
         end
 
         petActions = {}  -- Initialize petActions as an empty table.
 
         -- Iterate through the pet action bar slots.
         for slot = 1, NUM_PET_ACTION_SLOTS do
-            -- Get the pet action information for the current slot.
-            local name, _, _, token = GetPetActionInfo(slot)
+            -- Get the pet action information for the current slot (spellID is 7th return).
+            local name, _, isToken, _, _, _, spellID = GetPetActionInfo(slot)
 
             if name then  -- If there is an action in this slot, proceed.
-                if not token and petSpells[name] then
+                local realSpellID = spellID or petSpells[name]
+                if not isToken and realSpellID then
                     -- If the action is a spell and not a token, save the spell link.
-                    petActions[slot] = C_Spell.GetSpellLink(petSpells[name])
+                    petActions[slot] = C_Spell.GetSpellLink(realSpellID)
                 else
                     -- If the action is not a spell (or is a token), save it with a custom link format.
                     petActions[slot] = string.format(
                         "|cffff0000|Habp:pet:%s|h[%s]|h|r",
-                        name, _G[name]
+                        name, _G[name] or name
                     )
                 end
             end
@@ -442,7 +519,7 @@ function addon:ResetDefault(key, quiet)
     local profile
 
     -- Iterate through each profile and remove the key from the "fav" table if it exists.
-    for profile in table.s2k_values(list) do
+    for _, profile in pairs(list) do
         profile.fav = profile.fav or {}  -- Ensure the "fav" table exists.
         profile.fav[key] = nil  -- Remove the key from the "fav" table.
     end

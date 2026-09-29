@@ -1,4 +1,4 @@
-## Interface: 16001, 11506, 11507, 11508, 11509, 40402, 110007, 120000, 120005, 120007, 120100, 120105
+## Interface: 16001
 ## Title: Action Bar Profiles
 ## Author: Kaarosu
 ## SavedVariables: ActionBarProfilesDBv3

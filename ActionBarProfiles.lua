@@ -1,5 +1,5 @@
 local addonName, addon = ...
-_G.ABP = ABP
+_G.ABP = addon
 LibStub("AceAddon-3.0"):NewAddon(addon, addonName, "AceConsole-3.0", "AceTimer-3.0", "AceEvent-3.0")
 
 local L = LibStub("AceLocale-3.0"):GetLocale(addonName)
@@ -16,21 +16,49 @@ local UnitName, GetRealmName, UnitClass = UnitName, GetRealmName, UnitClass
 local GetSpecialization, GetSpecializationInfo = GetSpecialization, GetSpecializationInfo
 local InCombatLockdown, ToggleCharacter = InCombatLockdown, ToggleCharacter
 local C_Timer, C_UnitAuras = C_Timer, C_UnitAuras
+local AuraUtil = AuraUtil
+
+-- Fallback dummy frame: guarantees that Blizzard loops (Collapse, UpdateSidebarTabs, SetSidebar)
+-- will NEVER encounter a nil frame or crash with 'attempt to index a nil value'
+local ABPDummySideBarFrame = CreateFrame("Frame", "ABPDummySideBarFrame", UIParent)
+ABPDummySideBarFrame:Hide()
 
 PaperDollActionBarProfilesPane = PaperDollActionBarProfilesPane or nil
-local origGetPaperDollSideBarFrame
+
 local ABP_tabNum
 
 local CopyAttempts = 0
 
--- Overrides the default GetPaperDollSideBarFrame function to handle the custom ActionBarProfiles pane.
--- This function returns the custom pane for ActionBarProfiles if the specified index matches ABP_tabNum.
--- Otherwise, it calls the original function to retrieve the standard sidebar frame.
-function ABP_GetPaperDollSideBarFrame(index)
-    if index == ABP_tabNum then
-        return PaperDollActionBarProfilesPane;  -- Return the custom ActionBarProfiles pane.
-    else
-        return origGetPaperDollSideBarFrame(index);  -- Return the original sidebar frame for other indexes.
+-- Removed ABP_GetPaperDollSideBarFrame to prevent UI taint
+
+function addon:EnsureSidebarInjected()
+
+    -- Allow injection via either:
+    --  (a) Modern/Beta builds: CharacterFrame.ModeTabs (right-side vertical tabs)
+    --  (b) Classic/PaperDoll builds: PAPERDOLL_SIDEBARS + PaperDollSidebarTabs
+    local hasModeTabs = CharacterFrame and (CharacterFrame.ModeTabs or CharacterFrame.UpdateTabLayout)
+    local hasClassicSidebar = PAPERDOLL_SIDEBARS and PaperDollSidebarTabs
+
+    if not hasModeTabs and not hasClassicSidebar then return end
+
+    local pane = PaperDollActionBarProfilesPane or _G["PaperDollActionBarProfilesPane"]
+    if not pane then return end
+
+    if not self.sidebarTabInjected then
+        self:InjectPaperDollSidebarTab(
+            (L and L.charframe_tab) or "Action Bar Profiles",
+            "PaperDollActionBarProfilesPane",
+            "Interface\\AddOns\\ActionBarProfiles\\textures\\CharDollBtn",
+            { 0, 0.515625, 0, 0.13671875 }
+        )
+    end
+
+    if pane.OnInitialize and not pane.abpInitialized then
+        pane.abpInitialized = true
+        pane:OnInitialize()
+        if PaperDollActionBarProfilesSaveDialog and PaperDollActionBarProfilesSaveDialog.OnInitialize then
+            PaperDollActionBarProfilesSaveDialog:OnInitialize()
+        end
     end
 end
 
@@ -38,10 +66,17 @@ end
 -- Clears the action slots on the second action bar (slots 13 to 24).
 -- This function iterates through the specified action bar slots and clears each one.
 function ClearBarTwo()
+    if InCombatLockdown() then
+        if UIErrorsFrame then
+            UIErrorsFrame:AddMessage(ERR_CLIENT_LOCKED_OUT, 1.0, 0.1, 0.1, 1.0)
+        end
+        return
+    end
     for i = 13, 24 do
         addon:ClearSlot(i)  -- Clear each slot on the second action bar.
     end
 end
+addon.ClearBarTwo = ClearBarTwo
 
 
 
@@ -61,6 +96,37 @@ function addon:cPrint(cond, ...)
     end
 end
 
+
+-- Opens the addon options panel safely outside of combat lockdown.
+function addon:OpenOptions()
+    if InCombatLockdown() then
+        if UIErrorsFrame and ERR_NOT_IN_COMBAT then
+            UIErrorsFrame:AddMessage(ERR_NOT_IN_COMBAT, 1.0, 0.1, 0.1, 1.0)
+        end
+        return
+    end
+
+    if Settings and Settings.OpenToCategory then
+        if self.settingsCategory then
+            local categoryID = (self.settingsCategory.GetID and self.settingsCategory:GetID()) or self.settingsCategory.ID
+            if categoryID then
+                Settings.OpenToCategory(categoryID)
+                return
+            end
+        end
+
+        local category = Settings.GetCategory and Settings.GetCategory(addonName)
+        if category then
+            local categoryID = (category.GetID and category:GetID()) or category.ID or addonName
+            Settings.OpenToCategory(categoryID)
+            return
+        end
+    end
+
+    if InterfaceOptionsFrame_OpenToCategory then
+        InterfaceOptionsFrame_OpenToCategory(addonName)
+    end
+end
 
 -- Invalidates the current cache, forcing a rebuild on the next GUI update.
 function addon:InvalidateCache()
@@ -94,9 +160,7 @@ function addon:OnInitialize()
     self:RegisterChatCommand("abp", "OnChatCommand")
 
     -- Register the addon settings in the Blizzard options panel.
-    LibStub("AceConfig-3.0"):RegisterOptionsTable(addonName, self:GetOptions())
-    LibStub("AceConfigDialog-3.0"):AddToBlizOptions(addonName, nil, nil, "general")
-    LibStub("AceConfigDialog-3.0"):AddToBlizOptions(addonName, self.options.args.profiles.name, addonName, "profiles")
+    self:RegisterSettings()
 
     -- Create and register a minimap icon using LibDataBroker and LibDBIcon.
     self.ldb = LibStub("LibDataBroker-1.1"):NewDataObject(addonName, {
@@ -109,9 +173,14 @@ function addon:OnInitialize()
         OnLeave = function() end,
         OnClick = function(obj, button)
             if button == "RightButton" then
-                --InterfaceOptionsFrame_OpenToCategory(addonName) -- Open options on right-click.
-                Settings.OpenToCategory(addonName) -- Open options on right-click.
+                self:OpenOptions()
             else
+                if InCombatLockdown() then
+                    if UIErrorsFrame and ERR_NOT_IN_COMBAT then
+                        UIErrorsFrame:AddMessage(ERR_NOT_IN_COMBAT, 1.0, 0.1, 0.1, 1.0)
+                    end
+                    return
+                end
                 ToggleCharacter("PaperDollFrame") -- Toggle character frame on left-click.
             end
         end,
@@ -122,29 +191,64 @@ function addon:OnInitialize()
     self.icon:Register(addonName, self.ldb, self.db.profile.minimap)
 
     -- Check and update existing profiles to include specID if missing
-    for profileName, profile in pairs(self.db.profile.list) do
-        if not profile.specID then
-            profile.specID = GetSpecializationInfo(GetSpecialization())
-            --print("Updated specID for profile: " .. profileName)
+    if self.db and self.db.profile and self.db.profile.list then
+        local currentSpecID = (type(GetSpecialization) == "function" and GetSpecialization() and type(GetSpecializationInfo) == "function" and GetSpecializationInfo(GetSpecialization())) or 0
+        for profileName, profile in pairs(self.db.profile.list) do
+            if not profile.specID then
+                profile.specID = currentSpecID
+            end
         end
     end
 
-    -- Override the default GetPaperDollSideBarFrame function with a custom one.
-    origGetPaperDollSideBarFrame = GetPaperDollSideBarFrame
-    GetPaperDollSideBarFrame = ABP_GetPaperDollSideBarFrame
+    self:EnsureSidebarInjected()
 
-    -- If the character frame for ActionBarProfiles is present, inject a new tab and initialize related panes.
-    if PaperDollActionBarProfilesPane then
-        self:InjectPaperDollSidebarTab(
-            L.charframe_tab, -- Localization for the tab label.
-            "PaperDollActionBarProfilesPane", -- The frame name.
-            "Interface\\AddOns\\ActionBarProfiles\\textures\\CharDollBtn", -- Texture for the tab icon.
-            { 0, 0.515625, 0, 0.13671875 } -- Coordinates for the texture.
-        )
+    -- Watch for Blizzard_UIPanels_Game and ensure hooks are applied whenever character frames load or show
+    local sidebarWatcher = CreateFrame("Frame")
+    sidebarWatcher:RegisterEvent("ADDON_LOADED")
+    sidebarWatcher:RegisterEvent("PLAYER_LOGIN")
+    sidebarWatcher:RegisterEvent("PLAYER_ENTERING_WORLD")
+    sidebarWatcher:SetScript("OnEvent", function(watcherSelf, event, loadedAddon)
+        if (event == "ADDON_LOADED" and loadedAddon == "Blizzard_UIPanels_Game") or (C_AddOns and C_AddOns.IsAddOnLoaded and C_AddOns.IsAddOnLoaded("Blizzard_UIPanels_Game")) then
+            addon:EnsureSidebarInjected()
+        end
+        -- On PLAYER_ENTERING_WORLD every addon has finished its OnInitialize,
+        -- so all custom sidebar tabs (e.g. Outfitter's OutfitterSidebarTab) are
+        -- already injected.  Re-run the lineup so no two custom tabs overlap.
+        if event == "PLAYER_ENTERING_WORLD" and addon.sidebarTabInjected then
+            C_Timer.After(0, function()
+                addon:LineUpPaperDollSidebarTabs()
+            end)
+        end
+    end)
 
-        -- Initialize the profiles pane and save dialog.
-        PaperDollActionBarProfilesPane:OnInitialize()
-        PaperDollActionBarProfilesSaveDialog:OnInitialize()
+    if type(ToggleCharacter) == "function" and hooksecurefunc then
+        hooksecurefunc("ToggleCharacter", function()
+            addon:EnsureSidebarInjected()
+        end)
+    end
+
+    if CharacterFrameMixin and hooksecurefunc then
+        if type(CharacterFrameMixin.Collapse) == "function" then
+            hooksecurefunc(CharacterFrameMixin, "Collapse", function()
+            end)
+        end
+        if type(CharacterFrameMixin.Expand) == "function" then
+            hooksecurefunc(CharacterFrameMixin, "Expand", function()
+                addon:EnsureSidebarInjected()
+            end)
+        end
+    end
+
+    -- Re-run tab lineup every time the native sidebar tabs are updated.
+    -- This securely handles re-layout for legacy tabs without tainting CharacterFrame:OnShow.
+    if type(PaperDollFrame_UpdateSidebarTabs) == "function" and hooksecurefunc then
+        hooksecurefunc("PaperDollFrame_UpdateSidebarTabs", function()
+            if addon.sidebarTabInjected then
+                C_Timer.After(0, function()
+                    addon:LineUpPaperDollSidebarTabs()
+                end)
+            end
+        end)
     end
 
     -- Register events to update the GUI during combat, resting, or when the talent group changes.
@@ -154,6 +258,13 @@ function addon:OnInitialize()
 
     self:RegisterEvent("PLAYER_REGEN_ENABLED", function(...)
         self:UpdateGUI() -- Update GUI when leaving combat.
+
+        -- Process combat deferred profile restoration
+        if self.pendingSpecRestore then
+            local profile = self.pendingSpecRestore
+            self.pendingSpecRestore = nil
+            self:UseProfile(profile)
+        end
     end)
 
     self:RegisterEvent("PLAYER_UPDATE_RESTING", function(...)
@@ -173,19 +284,24 @@ function addon:OnInitialize()
 
             -- Create a unique identifier for the player using their name, realm, and current spec.
             local player = UnitName("player") .. "-" .. GetRealmName()
-            local spec = GetSpecializationInfo(GetSpecialization())
+            local spec = (type(GetSpecialization) == "function" and GetSpecialization() and type(GetSpecializationInfo) == "function" and GetSpecializationInfo(GetSpecialization())) or 0
 
             -- If the spec has changed or is new, update the previous spec and load the favorite profile for the current spec.
             if not self.prevSpec or self.prevSpec ~= spec then
                 self.prevSpec = spec
 
-                -- Iterate through the profiles list to find and use the favorite profile for the current spec.
-                local list = self.db.profile.list
-                local profile
-
-                for profile in table.s2k_values(list) do
-                    if profile.fav and profile.fav[player .. "-" .. spec] then
-                        self:UseProfile(profile)
+                -- Guard: only iterate profiles when AceDB is fully initialized.
+                local list = self.db and self.db.profile and self.db.profile.list
+                if list then
+                    for _, profile in pairs(list) do
+                        if profile.fav and profile.fav[player .. "-" .. spec] then
+                            if InCombatLockdown() then
+                                self.pendingSpecRestore = profile
+                            else
+                                self:UseProfile(profile)
+                            end
+                            break
+                        end
                     end
                 end
             end
@@ -228,17 +344,14 @@ function addon:OnInitialize()
                        C_UnitAuras.GetPlayerAuraBySpellID(checkAura[3]) then
                         state = true
                     end
-                else
-                    -- Fallback loop (Older clients)
-                    local auraName, auraIcon, auraCount, auraType, auraDuration, auraExpiration, auraSource, auraIsStealable, auraNameplateShowPersonal, auraSpellId
-                    for index = 1, 40 do
-                        auraName, auraIcon, auraCount, auraType, auraDuration, auraExpiration, auraSource, auraIsStealable, auraNameplateShowPersonal, auraSpellId = UnitAura("player", index)
-                        if auraSpellId and (auraSpellId == checkAura[1] or auraSpellId == checkAura[2] or auraSpellId == checkAura[3]) then
+                elseif AuraUtil and AuraUtil.ForEachAura then
+                    -- Safe iteration via AuraUtil without deprecated UnitAura
+                    AuraUtil.ForEachAura("player", "HELPFUL", nil, function(aura)
+                        if aura and (aura.spellId == checkAura[1] or aura.spellId == checkAura[2] or aura.spellId == checkAura[3]) then
                             state = true
-                            break
+                            return true -- Stop iteration
                         end
-                        if not auraName then break end
-                    end
+                    end, true)
                 end
 
                 -- If the aura state has changed, update the stored state and refresh the GUI.
@@ -275,19 +388,32 @@ function addon:OnChatCommand(message)
     -- Parse the command and parameter from the message.
     local cmd, param = self:ParseArgs(message)
 
-    -- If no command is provided, exit the function.
-    if not cmd then return end
+    -- If no command is provided, print usage or open config.
+    if not cmd or cmd == "" or cmd == "help" then
+        self:Printf("Usage: /abp [list | save <name> | load <name> | delete <name> | config | gui]")
+        return
+    end
+
+    -- Open settings panel or toggle UI
+    if cmd == "config" or cmd == "options" or cmd == "opt" then
+        self:OpenOptions()
+        return
+    elseif cmd == "gui" or cmd == "ui" then
+        if not InCombatLockdown() then
+            ToggleCharacter("PaperDollFrame")
+        end
+        return
+    end
 
     -- Handle the "list" or "ls" command, which lists all saved profiles.
     if cmd == "list" or cmd == "ls" then
         local list = {} -- Initialize an empty list to store profile names.
 
         -- Retrieve and format each profile's name and class color for display.
-        local profile
-        for profile in table.s2k_values({ self:GetProfiles() }) do
-            table.insert(list, string.format("|c%s%s|r",
-                RAID_CLASS_COLORS[profile.class].colorStr, profile.name
-            ))
+        local profiles = { self:GetProfiles() }
+        for _, profile in ipairs(profiles) do
+            local colorStr = (profile.class and RAID_CLASS_COLORS[profile.class] and RAID_CLASS_COLORS[profile.class].colorStr) or "ffffffff"
+            table.insert(list, string.format("|c%s%s|r", colorStr, profile.name))
         end
 
         -- If there are profiles, print them; otherwise, print a message saying the list is empty.
@@ -299,6 +425,11 @@ function addon:OnChatCommand(message)
 
     -- Handle the "save" or "sv" command, which saves the current state to a profile.
     elseif cmd == "save" or cmd == "sv" then
+        if InCombatLockdown() then
+            UIErrorsFrame:AddMessage(ERR_CLIENT_LOCKED_OUT, 1.0, 0.1, 0.1, 1.0)
+            self:Printf(ERR_CLIENT_LOCKED_OUT)
+            return
+        end
         if param then
             -- Check if the profile already exists.
             local profile = self:GetProfiles(param, true)
@@ -329,6 +460,11 @@ function addon:OnChatCommand(message)
 
     -- Handle the "use", "load", or "ld" command, which loads and uses a profile.
     elseif cmd == "use" or cmd == "load" or cmd == "ld" then
+        if InCombatLockdown() then
+            UIErrorsFrame:AddMessage(ERR_CLIENT_LOCKED_OUT, 1.0, 0.1, 0.1, 1.0)
+            self:Printf(ERR_CLIENT_LOCKED_OUT)
+            return
+        end
         if param then
             -- Check if the profile exists.
             local profile = self:GetProfiles(param, true)
@@ -453,7 +589,7 @@ function addon:UpdateTooltip(tooltip)
                     end
                 else
                     -- If there are no failures, apply the profile directly.
-                    ABP:UseProfile(profile, false, cache)
+                    addon:UseProfile(profile, false, cache)
                 end
             end)
         end
@@ -515,7 +651,7 @@ function addon:SavePetJournalFilters()
     local saved = { flag = {}, source = {}, type = {} }
 
     -- Save the current search filter text.
-    saved.text = C_PetJournal.GetSearchFilter()
+    saved.text = self:GetPetJournalSearchFilter()
 
     -- Save the state of the collected and not collected flags.
     local i
@@ -565,90 +701,401 @@ end
 -- Injects a custom tab into the PaperDoll sidebar in the character frame.
 -- This function allows adding a new tab to the character pane alongside existing ones like "Stats" and "Titles."
 function addon:InjectPaperDollSidebarTab(name, frame, icon, texCoords)
-    -- Calculate the next available tab index in the PAPERDOLL_SIDEBARS array.
-    local tab = #PAPERDOLL_SIDEBARS + 1
-    -- Store the tab number in a global variable for reference.
-    ABP_tabNum = tab
+    if self.sidebarTabInjected then return end
+    self.sidebarTabInjected = true
 
-    -- Insert the new tab's information (name, icon, texture coordinates) into the PAPERDOLL_SIDEBARS array.
-    PAPERDOLL_SIDEBARS[tab] = { 
-        name = name, 
-        icon = icon, 
-        texCoords = texCoords, 
-        IsActive = function() return true end -- Function to determine if the tab is active (always true in this case).
-    }
+    local tabName = "ABPSidebarTab"
+    local pane = _G[frame]
 
-    -- Create a new button for the tab and assign it to the PaperDollSidebarTabs frame.
-    CreateFrame(
-        "Button", "PaperDollSidebarTab" .. tab, PaperDollSidebarTabs,
-        "PaperDollSidebarTabTemplate", tab
-    )
+    if CharacterFrame and (CharacterFrame.ModeTabs or CharacterFrame.UpdateTabLayout) then
+        -- WOW 11.0+ / Camelot (12.0) - Main Right Side Tab Injection
+        -- Do not parent to CharacterFrame.ModeTabs as it is a ResizeLayoutFrame which
+        -- will cause a "secret number value" taint when it tries to sort insecure children
+        local parentFrame = CharacterFrame
+        local btn = _G[tabName]
+        if not btn then
+            btn = CreateFrame("Button", tabName, parentFrame, "CharacterFrameModeSideTabTemplate")
+        end
+        btn.frameName = frame
+        btn.tooltipText = name
+        -- Do not set btn.iconTexture to a file path; 11.0+ expects an Atlas name and would show a magenta placeholder.
+        -- btn.iconTexture = icon
 
-    -- Align all sidebar tabs, ensuring they are positioned correctly.
-    self:LineUpPaperDollSidebarTabs()
+        if btn.Icon then
+            btn:SetChecked(false)
+            -- Bypass Blizzard's broken atlas template completely by hiding the native icon and overlaying our own
+            btn.Icon:Hide()
+            btn.Icon:SetAlpha(0)
+            
+            if not btn.customIcon then
+                btn.customIcon = btn:CreateTexture(nil, "OVERLAY")
+                btn.customIcon:SetAllPoints(btn.Icon)
+            end
+            
+            btn.customIcon:SetTexture(icon or "Interface\\Icons\\INV_Misc_Book_09")
+            if texCoords then
+                btn.customIcon:SetTexCoord(unpack(texCoords))
+            else
+                btn.customIcon:SetTexCoord(0, 1, 0, 1)
+            end
+            btn.customIcon:Show()
+        end
 
-    -- Override the PaperDollFrame_SetLevel function to adjust the position of the character level text.
-    if not self.prevSetLevel then
-        -- Save the original function reference to restore or extend its behavior.
-        self.prevSetLevel = PaperDollFrame_SetLevel
+        -- Removed table.insert into ModeTabs.Tabs!
+        -- Inserting an insecure addon frame into a secure Blizzard table causes execution taint
+        -- when Blizzard iterates over it and calls methods on it (e.g. during UpdateTabLayout).
+        -- We handle positioning securely via hooksecurefunc("UpdateTabLayout") below instead.
 
-        -- Replace the original PaperDollFrame_SetLevel with a custom function.
-        PaperDollFrame_SetLevel = function(...)
-            -- Call the original function first to maintain existing functionality.
-            self.prevSetLevel(...)
+        btn:Show()
 
-            -- Calculate how many additional tabs have been added beyond the default number.
-            local extra = #PAPERDOLL_SIDEBARS - ABP_DEFAULT_PAPERDOLL_NUM_TABS
+        btn:SetScript("OnEnter", function(self)
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:SetText(name, 1, 1, 1)
+            GameTooltip:Show()
+        end)
+        btn:SetScript("OnLeave", function(self)
+            GameTooltip:Hide()
+        end)
 
-            -- Adjust the position of the character level text if the right inset panel is visible.
-            if CharacterFrameInsetRight:IsVisible() then
-                local index
-                for index = 1, CharacterLevelText:GetNumPoints() do
-                    -- Get the current anchor point information of the character level text.
-                    local point, relTo, relPoint, x, y = CharacterLevelText:GetPoint(index)
+        -- Removed nativeTab:HookScript("OnMouseDown") to eliminate taint risks.
+        -- ShowSubFrame hook safely handles pane hiding when switching back to native tabs.
 
-                    -- If the point is anchored to the center, adjust the X position to accommodate the extra tabs.
-                    if point == "CENTER" then
-                        CharacterLevelText:SetPoint(
-                            point, relTo, relPoint,
-                            x - (20 + 10 * extra), y
-                        )
+        hooksecurefunc(CharacterFrame, "ShowSubFrame", function(self, frameName)
+            if frameName == frame then
+                for _, subFrameName in pairs(CHARACTERFRAME_SUBFRAMES or {}) do
+                    if _G[subFrameName] and subFrameName ~= "PaperDollFrame" then
+                        _G[subFrameName]:Hide()
                     end
                 end
+                
+                if PaperDollFrame then PaperDollFrame:Show() end
+                if CharacterStatsPane then CharacterStatsPane:Hide() end
+                if CharacterStatsPaneScrollBox then CharacterStatsPaneScrollBox:Hide() end
+                if CharacterStatsPanePetScrollBox then CharacterStatsPanePetScrollBox:Hide() end
+                if PaperDollSidebarTabs then PaperDollSidebarTabs:Hide() end
+                if CharacterLevelText then CharacterLevelText:Hide() end
+                
+                if pane then
+                    if CharacterFrameRightPaneHost then
+                        pane:ClearAllPoints()
+                        pane:SetParent(CharacterFrameRightPaneHost)
+                        pane:SetPoint("TOPLEFT", CharacterFrameRightPaneHost, "TOPLEFT", 2, -22)
+                        pane:SetPoint("BOTTOMRIGHT", CharacterFrameRightPaneHost, "BOTTOMRIGHT", -25, 2)
+                    elseif CharacterFrame and CharacterFrame.InsetRight then
+                        pane:ClearAllPoints()
+                        pane:SetParent(CharacterFrame.InsetRight)
+                        pane:SetPoint("TOPLEFT", CharacterFrame.InsetRight, "TOPLEFT", 2, -22)
+                        pane:SetPoint("BOTTOMRIGHT", CharacterFrame.InsetRight, "BOTTOMRIGHT", -25, 2)
+                    elseif CharacterStatsPane then
+                        pane:ClearAllPoints()
+                        pane:SetParent(CharacterStatsPane:GetParent())
+                        pane:SetPoint("TOPLEFT", CharacterStatsPane, "TOPLEFT", 0, 0)
+                        pane:SetPoint("BOTTOMRIGHT", CharacterStatsPane, "BOTTOMRIGHT", 0, 0)
+                    end
+                    pane:Show()
+                end
+            elseif pane and pane:IsShown() then
+                pane:Hide()
+                if frameName == "PaperDollFrame" then
+                    if CharacterStatsPaneScrollBox then CharacterStatsPaneScrollBox:Show()
+                    elseif CharacterStatsPane then CharacterStatsPane:Show() end
+                    if PaperDollSidebarTabs then PaperDollSidebarTabs:Show() end
+                    if CharacterLevelText then CharacterLevelText:Show() end
+                end
             end
+        end)
+
+        if CharacterFrame.SetSelectedModeTabByFrame then
+            hooksecurefunc(CharacterFrame, "SetSelectedModeTabByFrame", function(self, frameName)
+                if btn and btn.SetChecked then
+                    btn:SetChecked(frameName == frame)
+                end
+            end)
+        end
+
+        hooksecurefunc(CharacterFrame, "UpdateTitle", function(self)
+            if self.activeSubframe == frame then
+                self:SetTitle(name)
+            end
+        end)
+
+        -- Deferred re-anchor: after Blizzard's UpdateTabLayout places our btn
+        -- (now in ModeTabs.Tabs), wait one frame so Outfitter's hook has also
+        -- run, then re-anchor btn below the lowest visible child of ModeTabs
+        -- to guarantee we sit below any other addon tabs.
+        hooksecurefunc(CharacterFrame, "UpdateTabLayout", function(self)
+            if not btn then return end
+            C_Timer.After(0, function()
+                if not btn or not self.ModeTabs then return end
+
+                local nativeTabsSet = {}
+                if self.ModeTabs.Tabs then
+                    for _, t in ipairs(self.ModeTabs.Tabs) do
+                        nativeTabsSet[t] = true
+                    end
+                end
+
+                local customTabs = {}
+                for _, child in ipairs({ self.ModeTabs:GetChildren() }) do
+                    -- Find any Button children that aren't in the native Tabs array and aren't us
+                    if child:IsObjectType("Button") and child:IsShown() and not nativeTabsSet[child] and child ~= btn then
+                        table.insert(customTabs, child)
+                    end
+                end
+
+                btn:ClearAllPoints()
+                if #customTabs > 0 then
+                    -- If there are other custom tabs (like Outfitter), anchor below the last one found
+                    btn:SetPoint("TOPLEFT", customTabs[#customTabs], "BOTTOMLEFT", 0, -2)
+                elseif self.ModeTabs.Tabs and #self.ModeTabs.Tabs > 0 then
+                    -- Otherwise, anchor below the last native tab
+                    local lastNativeTab = self.ModeTabs.Tabs[#self.ModeTabs.Tabs]
+                    btn:SetPoint("TOPLEFT", lastNativeTab, "BOTTOMLEFT", 0, -2)
+                end
+            end)
+        end)
+
+        -- Do NOT call CharacterFrame:UpdateTabLayout() manually!
+        -- Calling it from insecure code taints the ResizeLayoutFrame (ModeTabs) and causes "secret number value" comparisons to fail.
+        -- We will manually trigger our layout logic once instead.
+        if CharacterFrame.ModeTabs then
+            C_Timer.After(0.1, function()
+                if not btn then return end
+                local nativeTabsSet = {}
+                if CharacterFrame.ModeTabs.Tabs then
+                    for _, t in ipairs(CharacterFrame.ModeTabs.Tabs) do
+                        nativeTabsSet[t] = true
+                    end
+                end
+
+                local customTabs = {}
+                for _, child in ipairs({ CharacterFrame.ModeTabs:GetChildren() }) do
+                    if child:IsObjectType("Button") and child:IsShown() and not nativeTabsSet[child] and child ~= btn then
+                        table.insert(customTabs, child)
+                    end
+                end
+
+                btn:ClearAllPoints()
+                if #customTabs > 0 then
+                    btn:SetPoint("TOPLEFT", customTabs[#customTabs], "BOTTOMLEFT", 0, -2)
+                elseif CharacterFrame.ModeTabs.Tabs and #CharacterFrame.ModeTabs.Tabs > 0 then
+                    local lastNativeTab = CharacterFrame.ModeTabs.Tabs[#CharacterFrame.ModeTabs.Tabs]
+                    btn:SetPoint("TOPLEFT", lastNativeTab, "BOTTOMLEFT", 0, -2)
+                end
+            end)
+        end
+        
+        local function OnTabClicked()
+            if CharacterFrame.SetSelectedModeTabByFrame then
+                CharacterFrame:SetSelectedModeTabByFrame(frame)
+            elseif CharacterFrame.SelectTab then
+                CharacterFrame:SelectTab(btn)
+            end
+            if CharacterFrame.ShowSubFrame then
+                CharacterFrame:ShowSubFrame(frame)
+            end
+        end
+
+        if type(btn.SetCustomOnMouseUpHandler) == "function" then
+            btn:SetCustomOnMouseUpHandler(OnTabClicked)
+        else
+            btn:SetScript("OnClick", OnTabClicked)
+        end
+
+    elseif PAPERDOLL_SIDEBARS and PaperDollSidebarTabs then
+        -- Classic / Older Retail (Pre-11.0) Logic
+        PAPERDOLL_SIDEBARS[0] = {
+            name = name,
+            icon = icon,
+            texCoords = texCoords
+        }
+
+        local btn = _G[tabName]
+        if not btn then
+            btn = CreateFrame(
+                "Button", tabName, PaperDollSidebarTabs,
+                "PaperDollSidebarTabTemplate", 0
+            )
+        end
+
+        PAPERDOLL_SIDEBARS[0] = nil
+
+        if btn.Icon then
+            btn.Icon:SetTexture(icon)
+            if texCoords then btn.Icon:SetTexCoord(unpack(texCoords)) end
+        end
+        btn.tooltipText = name
+
+        btn:SetScript("OnClick", function(self)
+            if pane and pane:IsShown() then
+                pane:Hide()
+                if PaperDollSidebarTab1 then PaperDollSidebarTab1:Click() end
+            else
+                if type(PaperDollFrame_SetSidebar) == "function" and
+                   PAPERDOLL_SIDEBARS and PAPERDOLL_SIDEBARS[1] then
+                    PaperDollFrame_SetSidebar(PaperDollFrame, 1)
+                elseif CharacterFrame and type(CharacterFrame.Expand) == "function" then
+                    CharacterFrame:Expand()
+                end
+
+                for i = 1, #PAPERDOLL_SIDEBARS do
+                    local nativeInfo = PAPERDOLL_SIDEBARS[i]
+                    if nativeInfo and nativeInfo.frame then
+                        local nativeFrame = type(nativeInfo.frame) == "string" and _G[nativeInfo.frame] or nativeInfo.frame
+                        if nativeFrame and nativeFrame.Hide then
+                            nativeFrame:Hide()
+                        end
+                    end
+                    local nativeTab = _G["PaperDollSidebarTab"..i]
+                    if nativeTab then
+                        if nativeTab.Hider then nativeTab.Hider:Show() end
+                        if nativeTab.Highlight then nativeTab.Highlight:Show() end
+                    end
+                end
+
+                if pane and pane.Show then
+                    if CharacterFrameInsetRight then
+                        pane:ClearAllPoints()
+                        pane:SetParent(CharacterFrameInsetRight)
+                        pane:SetPoint("TOPLEFT", CharacterFrameInsetRight, "TOPLEFT", 4, -4)
+                        pane:SetPoint("BOTTOMRIGHT", CharacterFrameInsetRight, "BOTTOMRIGHT", -4, 4)
+                    end
+                    
+                    if CharacterStatsPane then CharacterStatsPane:Hide() end
+                    if PaperDollTitlesPane then PaperDollTitlesPane:Hide() end
+                    if PaperDollEquipmentManagerPane then PaperDollEquipmentManagerPane:Hide() end
+
+                    pane:Show()
+                end
+                if self.Hider then self.Hider:Hide() end
+                if self.Highlight then self.Highlight:Hide() end
+            end
+        end)
+        
+        for i = 1, #PAPERDOLL_SIDEBARS do
+            local nativeTab = _G["PaperDollSidebarTab"..i]
+            if nativeTab then
+                nativeTab:HookScript("OnClick", function()
+                    if pane and pane:IsShown() then
+                        pane:Hide()
+                    end
+                    if btn.Hider then btn.Hider:Show() end
+                    if btn.Highlight then btn.Highlight:Show() end
+                end)
+            end
+        end
+
+        btn:SetScript("OnEnter", function(self)
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:SetText(name, 1, 1, 1)
+            GameTooltip:Show()
+        end)
+        btn:SetScript("OnLeave", function()
+            GameTooltip:Hide()
+        end)
+
+        self:LineUpPaperDollSidebarTabs()
+
+        if not self.hasHookedSetLevel and type(PaperDollFrame_SetLevel) == "function" and hooksecurefunc then
+            self.hasHookedSetLevel = true
+            hooksecurefunc("PaperDollFrame_SetLevel", function(...)
+                local nativeCount = 0
+                local tabIdx = 1
+                while _G["PaperDollSidebarTab" .. tabIdx] do
+                    nativeCount = nativeCount + 1
+                    tabIdx = tabIdx + 1
+                end
+                local totalChildren = PaperDollSidebarTabs and select("#", PaperDollSidebarTabs:GetChildren()) or 0
+                local extra = math.max(0, totalChildren - nativeCount)
+                if extra == 0 then extra = 1 end
+
+                if CharacterFrameInsetRight and CharacterFrameInsetRight:IsVisible() and CharacterLevelText then
+                    for index = 1, CharacterLevelText:GetNumPoints() do
+                        local point, relTo, relPoint, x, y = CharacterLevelText:GetPoint(index)
+                        if point == "CENTER" then
+                            if not CharacterLevelText.abpOriginalX then
+                                CharacterLevelText.abpOriginalX = x
+                            end
+                            CharacterLevelText:SetPoint(
+                                point, relTo, relPoint,
+                                CharacterLevelText.abpOriginalX - (20 + 10 * extra), y
+                            )
+                        end
+                    end
+                end
+            end)
         end
     end
 end
 
 
 -- Aligns the PaperDoll sidebar tabs on the character frame.
--- This function repositions the tabs based on how many additional tabs have been added.
+-- Collects ALL buttons parented to PaperDollSidebarTabs so that custom tabs
+-- from other addons (e.g. Outfitter's OutfitterSidebarTab) are included in
+-- the lineup and never overlap with ABPSidebarTab.
 function addon:LineUpPaperDollSidebarTabs()
-    -- Calculate how many extra tabs have been added beyond the default number.
-    local extra = #PAPERDOLL_SIDEBARS - ABP_DEFAULT_PAPERDOLL_NUM_TABS
-    local prev  -- Variable to store the previous tab in the loop for positioning.
+    if not PaperDollSidebarTabs then return end
+    
+    -- In Camelot/12.0, if we injected into the vertical ModeTabs,
+    -- ModeTabs handles its own layout via UpdateTabLayout. We should NOT
+    -- try to line up with the horizontal PaperDollSidebarTabs.
+    if CharacterFrame and (CharacterFrame.ModeTabs or CharacterFrame.UpdateTabLayout) then return end
 
-    -- Iterate through all tabs in the PAPERDOLL_SIDEBARS array.
-    local index
-    for index = 1, #PAPERDOLL_SIDEBARS do
-        -- Get the current tab by its global name.
-        local tab = _G["PaperDollSidebarTab" .. index]
-        if tab then
-            -- Clear the existing anchor points for the tab.
-            tab:ClearAllPoints()
+    -- Step 1: collect Blizzard native tabs (PaperDollSidebarTab1, Tab2 ...)
+    local nativeTabs = {}
+    local tabIdx = 1
+    while _G["PaperDollSidebarTab" .. tabIdx] do
+        table.insert(nativeTabs, _G["PaperDollSidebarTab" .. tabIdx])
+        tabIdx = tabIdx + 1
+    end
+    local nativeCount = #nativeTabs
 
-            -- Set the position of the current tab based on the number of extra tabs.
-            tab:SetPoint("BOTTOMRIGHT", (extra < 2 and -20) or (extra < 3 and -10) or 0, 0)
+    -- Step 2: collect every other Button child of PaperDollSidebarTabs that
+    -- is NOT a native Blizzard tab.  This catches OutfitterSidebarTab,
+    -- ABPSidebarTab and any future addon tab regardless of its name.
+    local nativeSet = {}
+    for _, t in ipairs(nativeTabs) do nativeSet[t] = true end
 
-            -- If there is a previous tab, position it to the left of the current tab.
-            if prev then
-                prev:ClearAllPoints()
-                prev:SetPoint("RIGHT", tab, "LEFT", -4, 0)
-            end
-
-            -- Update the prev variable to the current tab for the next iteration.
-            prev = tab
+    local customTabs = {}
+    -- Prefer ABPSidebarTab last so it is always the rightmost custom tab
+    local abpTab = _G["ABPSidebarTab"]
+    local child = PaperDollSidebarTabs:GetChildren()
+    -- GetChildren() may return multiple values; iterate via select
+    local children = { PaperDollSidebarTabs:GetChildren() }
+    for _, child in ipairs(children) do
+        if not nativeSet[child] and child ~= abpTab then
+            table.insert(customTabs, child)
         end
+    end
+    if abpTab then
+        table.insert(customTabs, abpTab)
+    end
+
+    -- Step 3: merge: natives first, then other addons' custom tabs, ABP last
+    local allTabs = {}
+    for _, t in ipairs(nativeTabs)  do table.insert(allTabs, t) end
+    for _, t in ipairs(customTabs)  do table.insert(allTabs, t) end
+
+    if #allTabs == 0 then return end
+
+    -- Step 4: compute how many "extra" (non-Blizzard) tabs exist
+    local extra = #allTabs - nativeCount
+    if extra < 0 then extra = 0 end
+
+    -- Step 5: right-to-left anchor chain.
+    -- The rightmost tab gets BOTTOMRIGHT; every tab to its left chains off it.
+    local prev
+    for i = #allTabs, 1, -1 do
+        local currentTab = allTabs[i]
+        currentTab:ClearAllPoints()
+        if not prev then
+            -- rightmost tab: shift left of the frame edge based on extra count
+            currentTab:SetPoint("BOTTOMRIGHT", PaperDollSidebarTabs, "BOTTOMRIGHT",
+                (extra < 2 and -20) or (extra < 3 and -10) or 0, 0)
+        else
+            currentTab:SetPoint("RIGHT", prev, "LEFT", -4, 0)
+        end
+        prev = currentTab
     end
 end
 

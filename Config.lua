@@ -2,47 +2,63 @@ local addonName, addon = ...
 
 local L = LibStub("AceLocale-3.0"):GetLocale(addonName)
 
-function addon:GetOptions()
-    self.options = self.options or {
-        type = "group",
-        args = {
-            general = {
-                name = L.cfg_settings,
-                type = "group",
-                args = {
-                    minimap = {
-                        order = 1,
-                        name = L.cfg_minimap_icon,
-                        type = "toggle",
-                        width = "full",
-                        set = function(info, value)
-                            self.db.profile.minimap.hide = not value
-                            if value then
-                                self.icon:Show(addonName)
-                            else
-                                self.icon:Hide(addonName)
-                            end
-                        end,
-                        get = function(info)
-                            return not self.db.profile.minimap.hide
-                        end,
-                    },
-                    replace_macros = {
-                        order = 2,
-                        name = L.cfg_replace_macros,
-                        type = "toggle",
-                        width = "full",
-                        set = function(info, value)
-                            self.db.profile.replace_macros = value
-                        end,
-                        get = function(info)
-                            return self.db.profile.replace_macros
-                        end,
-                    },
-                },
-            },
-            profiles = LibStub("AceDBOptions-3.0"):GetOptionsTable(self.db),
-        },
-    }
-    return self.options
+function addon:RegisterSettings()
+    if Settings and Settings.RegisterVerticalLayoutCategory then
+        local category, layout = Settings.RegisterVerticalLayoutCategory(addonName)
+        self.settingsCategory = category
+
+        -- Setting 1: Minimap Icon Checkbox
+        local function GetMinimap()
+            return not (self.db and self.db.profile and self.db.profile.minimap and self.db.profile.minimap.hide)
+        end
+
+        local function SetMinimap(value)
+            if self.db and self.db.profile and self.db.profile.minimap then
+                self.db.profile.minimap.hide = not value
+            end
+            if self.icon then
+                if value then
+                    self.icon:Show(addonName)
+                else
+                    self.icon:Hide(addonName)
+                end
+            end
+        end
+
+        local minimapSetting = Settings.RegisterProxySetting(
+            category,
+            "ABP_SETTING_MINIMAP",
+            Settings.VarType.Boolean,
+            L.cfg_minimap_icon or "Show minimap icon",
+            false,
+            GetMinimap,
+            SetMinimap
+        )
+        Settings.CreateCheckbox(category, minimapSetting, L.cfg_minimap_icon or "Show minimap icon")
+
+        -- Setting 2: Replace Macros Checkbox
+        local function GetReplaceMacros()
+            return (self.db and self.db.profile and self.db.profile.replace_macros) or false
+        end
+
+        local function SetReplaceMacros(value)
+            if self.db and self.db.profile then
+                self.db.profile.replace_macros = value
+            end
+        end
+
+        local replaceMacrosSetting = Settings.RegisterProxySetting(
+            category,
+            "ABP_SETTING_REPLACE_MACROS",
+            Settings.VarType.Boolean,
+            L.cfg_replace_macros or "Replace macros",
+            false,
+            GetReplaceMacros,
+            SetReplaceMacros
+        )
+        Settings.CreateCheckbox(category, replaceMacrosSetting, L.cfg_replace_macros or "Replace macros")
+
+        Settings.RegisterAddOnCategory(category)
+    end
 end
+

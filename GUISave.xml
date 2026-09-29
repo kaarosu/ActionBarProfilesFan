@@ -3,7 +3,7 @@
     <Frame name="PaperDollActionBarProfilesSaveDialog" hidden="true" parent="PaperDollFrame">
         <Size x="297" y="254" />
         <Anchors>
-            <Anchor point="LEFT" relativePoint="RIGHT" x="280" y="125"/>
+            <Anchor point="TOPLEFT" relativeTo="PaperDollActionBarProfilesPane" relativePoint="TOPRIGHT" x="70" y="0"/>
         </Anchors>
         <Layers>
             <Layer level="BACKGROUND">
